@@ -1,0 +1,43 @@
+# ANVE speaker configuration. Copy to config.toml and edit. Anything left out keeps
+# its default (anve_device/config.py). The device key is NOT here: it lives in
+# /etc/anve-device/key (root only, mode 600).
+
+[server]
+url = "wss://app.anveai.com/api/assistant/ws"
+engine = "live"          # live = cloud voice model; local = speech-to-text on the ANVE box
+mode = "wake"            # wake = this device spots "Hey ANVE"; nothing is uploaded before it
+speak = true
+codec = "opus"           # falls back to pcm16 if the server has no Opus
+
+[audio]
+mic = "UACDemo"          # part of the microphone's PipeWire name (iBall 360Meet X)
+speaker = "SoundDrum"    # part of the speaker's PipeWire name
+bluetooth_mac = "AA:BB:CC:DD:EE:FF"   # the device keeps this Bluetooth speaker connected
+speaker_volume = 0.40    # measured: above 0.40 the microphone clips and echo cancelling degrades
+noise_suppression = true
+agc_target_db = -18.0
+agc_max_gain_db = 15.0
+
+[wake]
+model = "tiny.en"
+threads = 2              # 4 threads pulled the 5 V rail under the limit on the 3 A charger
+early_s = 1.3
+barge_in = true
+
+# The light strip is drawn by LUMINA (see lumina/README.md); the speaker reports to it.
+[lumina]
+enabled = true
+port = 8741
+
+# The older built-in LED driver: used only when [lumina] enabled = false.
+[leds]
+enabled = true
+count = 30
+brightness = 0.35
+
+[buttons]
+mute_gpio = 17           # header pin 11, switch to GND (pin 9)
+action_gpio = 27         # header pin 13, switch to GND (pin 14)
+
+[alarm]
+rounds = 3               # how many times the alarm tone repeats

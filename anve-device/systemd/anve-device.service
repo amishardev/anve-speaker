@@ -1,0 +1,64 @@
+# The ANVE smart speaker. Installed by tools/install_service.sh, which fills in the
+# user name and numeric id (@USER@, @UID@, @HOME@).
+#
+# It runs as the ordinary user, because PipeWire (the microphone, the echo canceller and
+# the Bluetooth speaker) lives in that user's session. `loginctl enable-linger` keeps
+# that session up from boot, with nobody logged in.
+#
+# The device key stays root-only (/etc/anve-device/key, mode 600). systemd reads it as
+# root and hands it to the service as a credential; the program never needs root.
+[Unit]
+Description=ANVE smart speaker
+Documentation=file://@HOME@/anve-device/README.md
+# After NetworkManager, not after "network is online": that wait cost 6 s of every boot,
+# and the program retries the server by itself (1, 2, 4 ... s) until the Wi-Fi is up.
+Wants=network-online.target bluetooth.target
+After=NetworkManager.service bluetooth.target user@@UID@.service anve-cpu-cap.service
+Requires=user@@UID@.service
+# It runs only on a box that has its key and has been through first-time setup
+# (anve-provision.service does that, with the phone app).
+ConditionPathExists=/etc/anve-device/key
+ConditionPathExists=/var/lib/anve-device/provisioned
+# No start limit: a crash must never leave the speaker dead until someone logs in.
+# The restart delay below backs off instead (see Restart*).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=audio spi gpio bluetooth
+WorkingDirectory=@HOME@/anve-device
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=key:/etc/anve-device/key
+# the secret shared with paired phones (anve_device/appapi.py), root-only like the key
+LoadCredential=app-token:/etc/anve-device/app-token
+# /run/anve: where tools/pair_app.py leaves a pairing code for the running speaker
+RuntimeDirectory=anve
+RuntimeDirectoryMode=0700
+# Sound must never wait for anything else on the Pi. These limits let PipeWire's audio
+# threads in this service (microphone, playback, the browser's sound) run with real-time
+# priority; tools/optimise_pi.sh gives the user's PipeWire itself the same.
+LimitRTPRIO=95
+LimitNICE=-19
+LimitMEMLOCK=268435456
+OOMScoreAdjust=-300
+# wait (up to 60 s) for the user's PipeWire to answer
+ExecStartPre=/usr/bin/timeout 60 /bin/sh -c 'until pw-cli info 0 >/dev/null 2>&1; do sleep 1; done'
+ExecStart=@HOME@/anve-device/.venv/bin/python -m anve_device.main
+# Every start opens one ANVE session, and the account may open 30 an hour. So restarts
+# back off from 10 s to 5 min: a crash loop settles at 12 starts an hour.
+Restart=always
+RestartSec=10
+RestartSteps=6
+RestartMaxDelaySec=300
+TimeoutStopSec=15
+# journald gets stdout/stderr; the program logs no secrets and no transcripts at INFO
+SyslogIdentifier=anve-device
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

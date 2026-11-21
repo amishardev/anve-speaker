@@ -1,0 +1,16 @@
+# Signs the Pi in to the Wi-Fi when its sign-in page is in the way (tools/wifi_login.py).
+# Started every 45 s by anve-wifi-login.timer; it does nothing when the internet is open.
+# The ID and password stay in a root-only file and reach the script as a credential.
+[Unit]
+Description=ANVE smart speaker: Wi-Fi sign-in
+After=network-online.target
+ConditionPathExists=/etc/anve-device/wifi-login
+
+[Service]
+Type=oneshot
+User=@USER@
+LoadCredential=wifi:/etc/anve-device/wifi-login
+ExecStart=/usr/bin/python3 @HOME@/anve-device/tools/wifi_login.py
+SuccessExitStatus=0 1 2 3 4
+SyslogIdentifier=anve-wifi-login
+NoNewPrivileges=true

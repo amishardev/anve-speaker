@@ -1,0 +1,41 @@
+# The box's link to the ANVE Box cloud (anve_device/boxlink.py; protocol 1 of
+# github.com/ANVEAI/anve-box). Installed by tools/install_boxlink.sh, which fills in the
+# user name, numeric id and folder (@USER@, @UID@, @HOME@).
+#
+# Its own service on purpose: it needs only the box's identity and a network. A box that
+# was set up from the setup page, with no key for the older platform, is online here all
+# the same; and if this link fails, the speaker carries on.
+#
+# The identity stays root-only (/etc/anvebox/identity.json, mode 600): systemd reads it as
+# root and hands it to the program as a credential. The program itself is not root.
+[Unit]
+Description=ANVE Box: link to the cloud
+Documentation=file://@HOME@/anve-device/README.md
+After=NetworkManager.service
+ConditionPathExists=/etc/anvebox/identity.json
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+# "input": the group that may switch the Pi's own LEDs
+SupplementaryGroups=input
+WorkingDirectory=@HOME@/anve-device
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=identity:/etc/anvebox/identity.json
+# /var/lib/anvebox: whether the box has an owner, its current claim secret, the reset note
+StateDirectory=anvebox
+StateDirectoryMode=0700
+# so the program can hand the green LED back to its usual job (SD-card activity)
+ExecStartPre=+/bin/sh -c 'chgrp input /sys/class/leds/ACT/trigger 2>/dev/null; chmod g+w /sys/class/leds/ACT/trigger 2>/dev/null; true'
+ExecStart=@HOME@/anve-device/.venv/bin/python -m anve_device.boxlink
+Nice=5
+Restart=always
+RestartSec=5
+SyslogIdentifier=anve-boxlink
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

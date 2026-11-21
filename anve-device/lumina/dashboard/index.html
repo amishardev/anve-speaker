@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>LUMINA</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>LUMINA</h1>
+  <span id="link" class="pill off">Connecting</span>
+</header>
+
+<main>
+  <section class="stage">
+    <canvas id="strip" width="1200" height="64" aria-label="Live preview of the LED strip"></canvas>
+    <div class="now">
+      <div>
+        <div id="visual" class="visual">…</div>
+        <div id="detail" class="detail"></div>
+      </div>
+      <div id="output" class="output"></div>
+    </div>
+    <div id="demo" class="demo" hidden>
+      <div><b>Demo.</b> <span id="demoText"></span></div>
+      <button id="demoOff" class="quiet">Back to live</button>
+    </div>
+    <div id="trouble" class="trouble" hidden></div>
+  </section>
+
+  <section>
+    <h2>Assistant</h2>
+    <div id="dims" class="dims"></div>
+  </section>
+
+  <section>
+    <h2>Try a state</h2>
+    <p class="hint">Shows the look for 20 seconds. The assistant's real state is not changed and comes back by itself.</p>
+    <div id="tests" class="tests"></div>
+  </section>
+
+  <section>
+    <h2>Light</h2>
+    <div class="rows" id="sliders"></div>
+    <div class="rows" id="choices"></div>
+  </section>
+
+  <section>
+    <h2>Animation per state</h2>
+    <div class="rows" id="variants"></div>
+  </section>
+
+  <section>
+    <h2>Colours</h2>
+    <p class="hint">On top of the theme. Reset puts the theme's colour back.</p>
+    <div class="colours" id="colours"></div>
+  </section>
+
+  <section>
+    <h2>Events</h2>
+    <ol id="log" class="log"></ol>
+  </section>
+</main>
+
+<div id="gate" class="gate" hidden>
+  <form id="gateForm">
+    <h2>Dashboard key</h2>
+    <p class="hint">Run <code>./status.sh</code> on the Pi to see it.</p>
+    <input id="key" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Dashboard key">
+    <p id="gateNote" class="bad" hidden>That key was not accepted.</p>
+    <button>Open</button>
+  </form>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

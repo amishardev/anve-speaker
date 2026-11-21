@@ -1,0 +1,34 @@
+# LUMINA: the light strip of the voice assistant. Installed by lumina/install.sh, which
+# fills in the user name, numeric id and folder (@USER@, @UID@, @DIR@, @PYTHON@).
+#
+# It is its own service on purpose: if the lights fail, the assistant carries on, and the
+# other way round. The two only share a UDP port on this machine.
+[Unit]
+Description=LUMINA light strip
+Documentation=file://@DIR@/lumina/README.md
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=spi
+WorkingDirectory=@DIR@
+Environment=PYTHONUNBUFFERED=1
+# for the optional music loopback (PipeWire lives in the user's session)
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+ExecStart=@PYTHON@ -m lumina
+# the lights never compete with sound for the processor
+Nice=10
+Restart=always
+RestartSec=3
+# on stop it fades out and switches every LED off before letting go of the SPI bus
+KillSignal=SIGTERM
+TimeoutStopSec=6
+SyslogIdentifier=lumina
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

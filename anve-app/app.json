@@ -1,0 +1,65 @@
+{
+  "expo": {
+    "name": "ANVE Home",
+    "slug": "anve-home",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "anvehome",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.anveai.home",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "ANVE Home talks to your ANVE box on your Wi-Fi: to set it up, to show what is playing and to change the volume.",
+        "NSBonjourServices": [
+          "_anve._tcp"
+        ],
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.anveai.home",
+      "adaptiveIcon": {
+        "backgroundColor": "#ECEDFD",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_STATE",
+        "CHANGE_NETWORK_STATE",
+        "ACCESS_FINE_LOCATION",
+        "NEARBY_WIFI_DEVICES",
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true,
+            "enableMinifyInReleaseBuilds": false,
+            "enableShrinkResourcesInReleaseBuilds": false
+          }
+        }
+      ],
+      "expo-background-task",
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "color": "#5B6CFF"
+        }
+      ]
+    ]
+  }
+}

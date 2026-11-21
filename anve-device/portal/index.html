@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#1C1C1E">
+  <!-- Only this box's own files may run here. The one outside request the page makes is
+       "is this device back online?", to ANVE, after the box has left. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https:; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>Set up your ANVE Box</title>
+  <link rel="stylesheet" href="assets/anve.css">
+  <link rel="stylesheet" href="assets/portal.css">
+  <script src="assets/led.js" defer></script>
+  <script type="module" src="assets/seal/seal.mjs"></script>
+  <script src="assets/portal.js" defer></script>
+</head>
+<body>
+  <!-- The box's side of the page: what it looks like right now, and where you are. -->
+  <aside class="stage" aria-label="Your ANVE Box">
+    <div class="stage-top">
+      <span class="brand">
+        <svg class="mark" viewBox="2 0 32 32" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="M16 7 L10 25 h3.4 l1.2-3.8 h6.8 L22.6 25 H26 L20 7 Z M15.6 18.4 L18 10.8 20.4 18.4 Z"/></svg>
+        ANVE Box
+      </span>
+      <span class="chip stage-chip" id="trial-chip" hidden>Test run</span>
+    </div>
+
+    <div class="scene" aria-hidden="true">
+      <span class="ring r1"></span><span class="ring r2"></span><span class="ring r3"></span>
+      <div class="boxart">
+        <svg viewBox="0 0 200 200" focusable="false">
+          <rect class="box-body" x="14" y="14" width="172" height="172" rx="44"/>
+          <rect class="box-face" x="26" y="26" width="148" height="148" rx="34"/>
+          <g class="box-grille">
+            <circle cx="100" cy="112" r="46"/><circle cx="100" cy="112" r="34"/>
+            <circle cx="100" cy="112" r="22"/><circle cx="100" cy="112" r="10"/>
+          </g>
+        </svg>
+        <span class="led stage-led" id="stage-led"></span>
+      </div>
+    </div>
+
+    <div class="stage-text">
+      <p class="stage-title" id="stage-title">Let's get your box online.</p>
+      <p class="stage-sub" id="stage-sub">The light on the box is pulsing slowly: it's ready for setup.</p>
+    </div>
+
+    <ol class="steps" id="steps">
+      <li class="step" data-step="1"><span class="dot"><span class="n">1</span><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-check"/></svg></span><span class="step-label">Choose Wi-Fi</span></li>
+      <li class="step" data-step="2"><span class="dot"><span class="n">2</span><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-check"/></svg></span><span class="step-label">Enter details</span></li>
+      <li class="step" data-step="3"><span class="dot"><span class="n">3</span><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-check"/></svg></span><span class="step-label" id="step3-label">Go online</span></li>
+    </ol>
+
+    <p class="stage-foot" id="stage-foot" hidden>
+      <span>Box <span class="mono" id="boxid-value"></span></span>
+      <span>Setup Wi-Fi <span class="mono" id="setupwifi-value"></span></span>
+    </p>
+  </aside>
+
+  <main class="work">
+    <!-- Shown over any step when this device can't reach the box any more -->
+    <div class="alert er lost" id="lost" role="alert" hidden>
+      <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-error"/></svg>
+      <div>
+        <p class="lost-title" id="lost-title"></p>
+        <p id="lost-text"></p>
+      </div>
+    </div>
+
+    <!-- 1. Choose a network -->
+    <section class="view" id="view-networks" aria-labelledby="title-networks">
+      <h1 class="h1" id="title-networks" tabindex="-1">Choose your Wi-Fi</h1>
+      <p class="lead">Pick the network this box should use. You'll need its password.</p>
+      <div class="alert er" id="error" role="alert" hidden>
+        <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-error"/></svg>
+        <p id="error-text"></p>
+      </div>
+      <div class="alert" id="notice" hidden>
+        <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-info"/></svg>
+        <p id="notice-text"></p>
+      </div>
+      <h2 class="ev">Networks nearby</h2>
+      <div class="group" id="networks" aria-busy="true">
+        <p class="row row-sub" id="networks-loading"><span class="spin dark" aria-hidden="true"></span>Looking for networks…</p>
+      </div>
+      <p class="help" id="networks-hint" hidden>No networks found. Move the box closer to your router and unplug it for a few seconds to search again, or choose Other network and type the name.</p>
+      <p class="note app-note">Have the ANVE Home app on your phone? You can close this page and set the box up there instead.</p>
+    </section>
+
+    <!-- 2. Details -->
+    <section class="view" id="view-join" aria-labelledby="title-join" hidden>
+      <button class="btn txt md back" id="back" type="button">
+        <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-chevron_left"/></svg>
+        Networks
+      </button>
+      <h1 class="h1 ssid" id="title-join" tabindex="-1"></h1>
+      <p class="lead" id="join-lead"></p>
+      <form id="join-form" novalidate>
+        <div class="fld" id="field-ssid" hidden>
+          <label for="ssid">Network name</label>
+          <input class="inp" id="ssid" name="ssid" maxlength="32" autocomplete="off"
+                 autocapitalize="none" autocorrect="off" spellcheck="false">
+          <p class="help" id="ssid-help" hidden></p>
+        </div>
+        <div class="fld" id="field-password">
+          <label for="password">Wi-Fi password</label>
+          <div class="inp-wrap">
+            <input class="inp" id="password" name="password" type="password" maxlength="64"
+                   autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
+                   aria-describedby="password-help">
+            <button class="reveal" id="reveal" type="button" aria-label="Show password" aria-pressed="false">
+              <svg class="icon" aria-hidden="true"><use id="reveal-icon" href="assets/icons.svg#i-visibility"/></svg>
+            </button>
+          </div>
+          <p class="help" id="password-help"></p>
+        </div>
+
+        <div class="pair">
+          <div class="fld">
+            <label for="boxname">Name for this box</label>
+            <input class="inp" id="boxname" name="boxname" maxlength="40" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="fld">
+            <label for="room">Room <span class="opt">optional</span></label>
+            <input class="inp" id="room" name="room" maxlength="40" autocomplete="off" placeholder="Living room">
+          </div>
+        </div>
+
+        <details class="more" id="more-signin">
+          <summary><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-chevron_right"/></svg>This Wi-Fi asks you to sign in on a web page</summary>
+          <div class="more-body">
+            <p class="help">Campus, hostel and hotel networks often do. The box signs in for you with these details, and again whenever the network asks.</p>
+            <div class="pair">
+              <div class="fld">
+                <label for="signin-user">Sign-in name</label>
+                <input class="inp" id="signin-user" maxlength="128" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+              </div>
+              <div class="fld">
+                <label for="signin-pass">Sign-in password</label>
+                <input class="inp" id="signin-pass" type="password" maxlength="128" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+              </div>
+            </div>
+            <p class="help" id="signin-help" hidden></p>
+          </div>
+        </details>
+
+        <details class="more" id="more-voice">
+          <summary><svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-chevron_right"/></svg><span id="voice-summary">Voice assistant key <span class="opt">optional</span></span></summary>
+          <div class="more-body">
+            <p class="help" id="voice-lead">Paste the box's ANVE device key to switch on "Hey ANVE". You can leave this empty: the box still goes online and joins your account. Adding the key afterwards means setting the box up again, so paste it now if you have it.</p>
+            <div class="fld">
+              <label for="voicekey">Device key</label>
+              <input class="inp mono" id="voicekey" type="password" maxlength="256" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+              <p class="help" id="voicekey-help" hidden></p>
+            </div>
+          </div>
+        </details>
+
+        <div class="alert er" id="send-error" role="alert" hidden>
+          <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-error"/></svg>
+          <p id="send-error-text"></p>
+        </div>
+        <button class="btn pri lg wide" id="connect" type="submit">Continue</button>
+        <p class="note sealed">
+          <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-lock"/></svg>
+          <span>Everything you type here is locked in this browser before it is sent, so only the box can read it.</span>
+        </p>
+      </form>
+    </section>
+
+    <!-- 3a. The link that adds the box to an account. The box waits here until you have it. -->
+    <section class="view" id="view-link" aria-labelledby="title-link" hidden>
+      <h1 class="h1" id="title-link" tabindex="-1">Keep this link</h1>
+      <p class="lead">It adds this box to your ANVE account. Copy it now: this page can't reach the box once it leaves the setup Wi-Fi.</p>
+      <div class="linkbox">
+        <span class="mono url" id="claim-url"></span>
+        <button class="btn sec md" id="copy" type="button">
+          <svg class="icon" aria-hidden="true"><use id="copy-icon" href="assets/icons.svg#i-content_copy"/></svg>
+          <span id="copy-label">Copy</span>
+        </button>
+      </div>
+      <p class="note">Treat it like a key: whoever opens it first owns the box. It works once.</p>
+      <div class="hold">
+        <div class="hold-bar" aria-hidden="true"><span id="hold-fill"></span></div>
+        <p class="b2 c2" id="hold-text"></p>
+      </div>
+      <button class="btn pri lg wide" id="go" type="button">I have the link. Connect now</button>
+    </section>
+
+    <!-- 3b. Connecting: the page is about to lose the box, so it says what comes next -->
+    <section class="view" id="view-connecting" aria-labelledby="title-connecting" hidden>
+      <h1 class="h1 ssid" id="title-connecting" tabindex="-1"></h1>
+      <p class="lead" id="connecting-lead"></p>
+
+      <div class="finish" id="finish" hidden>
+        <div class="waitrow" id="waitrow">
+          <span class="spin dark" id="wait-spin" aria-hidden="true"></span>
+          <svg class="icon okmark" id="wait-ok" aria-hidden="true" hidden><use href="assets/icons.svg#i-check"/></svg>
+          <p id="wait-text">Waiting for this device to get back on its usual Wi-Fi…</p>
+        </div>
+        <a class="btn pri lg wide" id="open-claim" target="_blank" rel="noopener" aria-disabled="true">Add the box to your account</a>
+        <div class="linkbox small">
+          <span class="mono url" id="claim-url-2"></span>
+          <button class="btn sec md" id="copy-2" type="button">
+            <svg class="icon" aria-hidden="true"><use id="copy-icon-2" href="assets/icons.svg#i-content_copy"/></svg>
+            <span id="copy-label-2">Copy</span>
+          </button>
+        </div>
+        <p class="note">Keep this tab open until you've opened the link. Signed in to ANVE on another device? Paste the link there instead.</p>
+      </div>
+
+      <div class="alert" id="voice-note" hidden>
+        <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-info"/></svg>
+        <p id="voice-note-text"></p>
+      </div>
+
+      <h2 class="ev">What the light on the box means</h2>
+      <ul class="group" id="legend">
+        <li class="row legend">
+          <span class="led" data-light="online" aria-hidden="true"></span>
+          <div class="row-main">
+            <p class="row-title" id="legend-online-title">Two short blinks</p>
+            <p class="row-sub" id="legend-online">Online. Open the link to add it to your account.</p>
+          </div>
+        </li>
+        <li class="row legend">
+          <span class="led" data-light="blocked" aria-hidden="true"></span>
+          <div class="row-main">
+            <p class="row-title">Three short blinks</p>
+            <p class="row-sub">On your Wi-Fi, but the network is blocking ANVE. The box keeps trying. If it stays like this, choose another network, or ask whoever manages this one to allow ANVE.</p>
+          </div>
+        </li>
+        <li class="row legend">
+          <span class="led" data-light="setup" aria-hidden="true"></span>
+          <div class="row-main">
+            <p class="row-title">Slow pulse</p>
+            <p class="row-sub" id="legend-setup">It couldn't connect. Join the setup Wi-Fi again to see why.</p>
+          </div>
+        </li>
+      </ul>
+    </section>
+
+    <!-- A test run of the hotspot (tools/hotspot_trial.sh): everything checked, nothing changed -->
+    <section class="view" id="view-trial" aria-labelledby="title-trial" hidden>
+      <h1 class="h1" id="title-trial" tabindex="-1">Test run complete</h1>
+      <p class="lead" id="trial-lead"></p>
+      <div class="alert">
+        <svg class="icon" aria-hidden="true"><use href="assets/icons.svg#i-info"/></svg>
+        <p>In a real setup the box would now give you the link that adds it to your account, then join your Wi-Fi. This test stays open while this page is open, until its time is up; then the box goes back to the Wi-Fi it was on.</p>
+      </div>
+      <button class="btn sec lg wide" id="trial-again" type="button">Back to the networks</button>
+    </section>
+
+    <p class="sr-only" id="live" aria-live="polite"></p>
+    <noscript><p class="b1">This page needs JavaScript to set up the box. Turn it on, then reload.</p></noscript>
+  </main>
+</body>
+</html>

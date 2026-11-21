@@ -1,0 +1,22 @@
+# Caps the CPU clock so the Pi 5 stays inside what its power supply can deliver.
+#
+# Measured 16 Nov 2026 on the 45 W dual-port charger (the Pi negotiated 3 A): at 2.4 GHz
+# with 4 busy threads the 5 V rail fell to 4.67 V and the kernel logged "Undervoltage
+# detected!"; the Pi had frozen once under the same load. At 1.8 GHz the rail stayed at
+# or above 4.80 V in every test.
+#
+# With a proper 5 V / 5 A supply this unit is not needed:
+#   sudo systemctl disable --now anve-cpu-cap.service
+[Unit]
+Description=ANVE device: cap the CPU clock for a weak power supply
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=ANVE_CPU_MAX_KHZ=1800000
+ExecStart=/bin/sh -c 'for p in /sys/devices/system/cpu/cpufreq/policy*; do echo "$ANVE_CPU_MAX_KHZ" > "$p/scaling_max_freq"; done'
+ExecStop=/bin/sh -c 'for p in /sys/devices/system/cpu/cpufreq/policy*; do cat "$p/cpuinfo_max_freq" > "$p/scaling_max_freq"; done'
+
+[Install]
+WantedBy=multi-user.target

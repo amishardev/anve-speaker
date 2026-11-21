@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.anveai.home'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.anvelottie"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  // Airbnb's Lottie player (Apache 2.0)
+  implementation 'com.airbnb.android:lottie:6.6.6'
+}

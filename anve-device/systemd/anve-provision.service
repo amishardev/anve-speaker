@@ -1,0 +1,37 @@
+# First-time setup and factory reset for the ANVE speaker (anve_device/provision.py).
+#
+# On a box that was never set up it opens the Wi-Fi hotspot "ANVE-xxxx" and waits for
+# the phone app. On a box that is set up it only waits (for a factory reset asked for
+# in the app). It runs as root: it changes the network through NetworkManager and
+# writes the root-only files in /etc/anve-device.
+#
+# ANVE_RECOVERY=1 would also reopen the hotspot when a set-up box has had no Wi-Fi for
+# three minutes. It is off until that has been tried on real hardware.
+#
+# The same hotspot serves a setup page for computers and browsers (portal/), and a device
+# that joins the hotspot opens that page by itself. ANVE_CAPTIVE=0 here turns the
+# "by itself" off (the page stays at http://10.42.0.1/); it is on when the line is absent.
+#
+# Installed by tools/install_service.sh (@UID@ and @HOME@ are filled in).
+[Unit]
+Description=ANVE smart speaker: first-time setup hotspot and factory reset
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+WorkingDirectory=@HOME@/anve-device
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=ANVE_USER_UID=@UID@
+Environment=ANVE_RECOVERY=0
+ExecStart=/usr/bin/python3 -m anve_device.provision
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=anve-provision
+# it needs /etc, /var/lib and /run; nothing in anyone's home folder
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

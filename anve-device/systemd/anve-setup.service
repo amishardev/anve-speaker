@@ -1,0 +1,24 @@
+# The ANVE speaker's setup page. It listens on 127.0.0.1:8737 ONLY: the Wi-Fi it sits on
+# may be an open network, so reach it through SSH from a laptop:
+#   ssh -L 8737:127.0.0.1:8737 @USER@@<pi address>     then open http://localhost:8737
+# Installed by tools/install_service.sh (@USER@, @UID@, @HOME@ are filled in).
+[Unit]
+Description=ANVE smart speaker: setup page (local only)
+After=user@@UID@.service
+Wants=user@@UID@.service
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=audio bluetooth
+WorkingDirectory=@HOME@/anve-device
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Environment=HF_HUB_OFFLINE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@HOME@/anve-device/.venv/bin/python -m anve_device.setup_web --port 8737
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=anve-setup
+
+[Install]
+WantedBy=multi-user.target

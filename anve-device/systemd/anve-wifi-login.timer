@@ -1,0 +1,10 @@
+[Unit]
+Description=ANVE smart speaker: check the Wi-Fi sign-in every 45 seconds
+
+[Timer]
+OnBootSec=25
+OnUnitActiveSec=45
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

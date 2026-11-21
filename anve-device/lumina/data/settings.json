@@ -1,0 +1,8 @@
+{
+  "_note": "The shipped defaults, for reference. LUMINA never writes here: your own settings live in ~/.config/lumina/settings.json (or $LUMINA_HOME) and only hold what you changed.",
+  "strip": {"count": 60, "active": 60, "offset": 0, "order": "GRB", "driver": "simulator", "spi_bus": 0, "spi_device": 0},
+  "brightness": 0.2,
+  "max_brightness": 0.2,
+  "power_limit_ma": 1500,
+  "theme": "futuristic-cyan"
+}

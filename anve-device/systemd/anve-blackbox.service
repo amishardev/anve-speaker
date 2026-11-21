@@ -1,0 +1,17 @@
+# The Pi's "black box" (tools/blackbox.sh): one line about supply voltage, temperature and
+# load every 15 s, so that after a freeze or a power cut there is something to read.
+# Installed by tools/optimise_pi.sh, which fills in the folder (@HOME@).
+[Unit]
+Description=ANVE smart speaker: black box (voltage, temperature, load before a restart)
+After=systemd-journald.service local-fs.target
+
+[Service]
+Type=simple
+ExecStart=@HOME@/anve-device/tools/blackbox.sh
+Nice=15
+Restart=always
+RestartSec=20
+SyslogIdentifier=anve-blackbox
+
+[Install]
+WantedBy=multi-user.target
