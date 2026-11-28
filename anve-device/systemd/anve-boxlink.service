@@ -26,6 +26,9 @@ LoadCredential=identity:/etc/anvebox/identity.json
 # /var/lib/anvebox: whether the box has an owner, its current claim secret, the reset note
 StateDirectory=anvebox
 StateDirectoryMode=0700
+# the socket the speaker connects to (protocol 2, anve_device/speakerlink.py); this user only
+RuntimeDirectory=anvebox
+RuntimeDirectoryMode=0700
 # so the program can hand the green LED back to its usual job (SD-card activity)
 ExecStartPre=+/bin/sh -c 'chgrp input /sys/class/leds/ACT/trigger 2>/dev/null; chmod g+w /sys/class/leds/ACT/trigger 2>/dev/null; true'
 ExecStart=@HOME@/anve-device/.venv/bin/python -m anve_device.boxlink

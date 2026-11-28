@@ -1,4 +1,4 @@
-"""The box's link to the ANVE Box cloud (github.com/ANVEAI/anve-box, protocol 1).
+"""The box's link to the ANVE Box cloud (github.com/ANVEAI/anve-box, protocols 1 and 2).
 
 This is the real-hardware side of part A of the team's docs/box-cloud-agreement.md. The
 connection itself, the signed hello and the claim secret are the team's own code, copied
@@ -18,6 +18,12 @@ that code needs from a real box:
 It runs beside the speaker (anve-device.service), not inside it, and needs nothing from
 it: a box that was set up from the setup page only, with no key for the older platform,
 is still online here, can be added to an account and answers "blink my box".
+
+Protocol 2 (the team's P4 handover, part E of the agreement): the cloud runs the box's body
+with a few generic commands (`listen`, `play`, `stop`, `record`), hears what the box is
+doing and when its button is held, and may call the speaker's own tools. This program takes
+them and passes them to the speaker over a local socket (speakerlink.py). If the speaker
+isn't connected, a command answers "busy" and the cloud tries again later.
 
     python -m anve_device.boxlink              run (anve-boxlink.service does)
     python -m anve_device.boxlink --status     what it knows, without connecting
@@ -46,6 +52,7 @@ from anvebox_agent.redact import Secret
 
 from . import config as C
 from . import ident
+from .speakerlink import SpeakerPort
 
 log = logging.getLogger("anve.boxlink")
 
@@ -55,6 +62,14 @@ RESET_NOTE = "reset-requested"        # left by the setup program on a factory r
 MAX_OVERLAY_SECONDS = 600             # as in the team's runtime.py
 OVERLAY_STATES = (State.ONLINE_UNCLAIMED, State.READY)   # the cloud may change the light only while online
 GRACE_S = 60.0                        # how long "can't reach ANVE" is ridden out before OFFLINE (states.md)
+
+# protocol 2 (part E of the agreement)
+GENERIC = ("listen", "play", "stop", "record")
+ACTIVITIES = ("idle", "listening", "speaking", "recording", "playing")
+SOUNDS = ("chime", "notice", "mark", "error")
+CHANNELS = ("dialog", "alert", "music")
+STOPS = ("listen", "play", "record", "all")
+LISTEN_LIGHT_S = 5                    # how long `listen`'s light shows before the talk's own
 
 
 def link_url(cloud: str) -> str:
@@ -197,6 +212,13 @@ class BoxAgent:
         self._overlay_until = 0.0
         self._player: asyncio.Task | None = None
         self.notes: list = []                 # (kind, text), for the tests
+        # protocol 2: set by attach_speaker(); until then the box says protocol 1
+        self.handlers: dict = {}
+        self.speaker: SpeakerPort | None = None
+        self.doing: dict = {}                 # what the speaker last said it is doing
+        self.tools: list = []                 # the speaker's own tools, as MCP descriptions
+        self.answers: dict = {}               # name -> what to tell the person, "{arg}" filled in
+        self.on_tool = self._tool_to_speaker
 
     # ---------- what the link needs (AgentPort) ----------
 
@@ -205,15 +227,21 @@ class BoxAgent:
 
     def status(self) -> dict:
         via = self.network_via()
-        return {"mode": self.state.value, "light": self.shown_pattern, "network": {"via": via} if via else {}}
+        status = {"mode": self.state.value, "light": self.shown_pattern, "network": {"via": via} if via else {}}
+        if self.doing:
+            status["state"] = dict(self.doing)
+        return status
 
     def run_command(self, name: str, args: dict) -> tuple:
-        """A command from the cloud (protocol 1). Returns (ok, error) at once."""
+        """A command from the cloud. Returns (ok, error) at once."""
         if name == "status.get":
             return True, None
         if name == "light.identify":
             return self._show_overlay("identify", IDENTIFY_SECONDS)
-        if name == "light.show":
+        if name in GENERIC:
+            handler = self.handlers.get(name)
+            return handler(dict(args)) if handler else (False, "unknown_command")
+        if name in ("light.show", "light"):   # "light" is protocol 2's name for it
             pattern, seconds = args.get("pattern"), args.get("seconds", 10)
             if not isinstance(pattern, str) or pattern not in PATTERNS:
                 return False, "bad_args"
@@ -223,6 +251,103 @@ class BoxAgent:
                 return False, "bad_args"
             return self._show_overlay(pattern, float(seconds))
         return False, "unknown_command"
+
+    # ---------- protocol 2: the speaker, through the local socket ----------
+
+    def attach_speaker(self, port: SpeakerPort):
+        """From now on the box takes the generic commands, and its hello says protocol 2."""
+        self.speaker = port
+        port.on_message, port.on_change = self.from_speaker, self._speaker_changed
+        self.handlers = {name: (lambda args, name=name: self._command(name, args)) for name in GENERIC}
+
+    @property
+    def generic_commands(self) -> list:
+        return ["light", *sorted(n for n in self.handlers if n in GENERIC)]
+
+    def _command(self, name: str, args: dict) -> tuple:
+        """`listen`, `play`, `stop` or `record`: checked here, answered at once from what
+        the speaker last reported, then passed on to it."""
+        bad = _bad_args(name, args)
+        if bad:
+            return False, "bad_args"
+        if self.speaker is None or not self.speaker.connected:
+            return False, "busy"
+        activity = self.doing.get("activity", "idle")
+        if name == "listen" and (activity in ("listening", "speaking", "recording") or self.doing.get("muted")):
+            return False, "busy"
+        if name == "record" and args.get("action") == "start" and activity == "recording":
+            return False, "busy"
+        if not self.speaker.send({"type": "command", "name": name, "args": args}):
+            return False, "busy"
+        if name == "listen" and args.get("light") and self.state in OVERLAY_STATES:
+            self._show_overlay(args["light"], LISTEN_LIGHT_S)
+        log.info("passed to the speaker: %s", name)
+        return True, None
+
+    def report(self, *, activity=None, volume=None, muted=None):
+        """What the speaker is doing (protocol 2's `state`). Odd values are left out."""
+        changed = False
+        if activity in ACTIVITIES and self.doing.get("activity") != activity:
+            self.doing["activity"], changed = activity, True
+        if isinstance(volume, (int, float)) and not isinstance(volume, bool):
+            volume = max(0, min(100, int(volume)))
+            if self.doing.get("volume") != volume:
+                self.doing["volume"], changed = volume, True
+        if isinstance(muted, bool) and self.doing.get("muted") != muted:
+            self.doing["muted"], changed = muted, True
+        if changed:
+            self._tell("status", {})
+
+    def pressed_long(self):
+        """A long press: the cloud decides what it does (D114: it starts a meeting)."""
+        self._tell("event", {"name": "button.long"})
+
+    def heard_wake_word(self):
+        self._tell("event", {"name": "wake"})
+
+    def set_tools(self, tools: list, answers: dict | None = None):
+        self.tools = [dict(t) for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)]
+        self.answers = {k: v for k, v in (answers or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        self._tell("tools", {})
+
+    def call_tool(self, args: dict) -> tuple:
+        """The cloud's `tools.call`: (True, what to tell the person) or (False, why not)."""
+        name, arguments = args.get("name"), args.get("arguments", {})
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            return False, "bad_args"
+        tool = next((t for t in self.tools if t.get("name") == name), None)
+        if tool is None or self.on_tool is None:
+            return False, "unknown_tool"
+        if not _fits(tool.get("inputSchema") or {}, arguments):
+            return False, "bad_args"
+        return self.on_tool(name, arguments)
+
+    def _tool_to_speaker(self, name: str, arguments: dict) -> tuple:
+        if self.speaker is None or not self.speaker.send({"type": "tool", "name": name, "arguments": arguments}):
+            return True, "The speaker isn't running right now, so that couldn't be done."
+        log.info("the speaker's tool %s", name)
+        try:
+            return True, self.answers.get(name, "Done.").format(**arguments)
+        except (KeyError, IndexError, ValueError):
+            return True, "Done."
+
+    def from_speaker(self, message: dict):
+        kind = message.get("type")
+        if kind == "report":
+            self.report(activity=message.get("activity"), volume=message.get("volume"), muted=message.get("muted"))
+        elif kind == "event" and message.get("name") == "button.long":
+            self.pressed_long()
+        elif kind == "event" and message.get("name") == "wake":
+            self.heard_wake_word()
+        elif kind == "tools" and isinstance(message.get("tools"), list):
+            self.set_tools(message["tools"], message.get("answers") if isinstance(message.get("answers"), dict) else None)
+
+    def _speaker_changed(self, connected: bool):
+        if not connected:                      # nothing is known about a speaker that is gone
+            self.doing = {}
+            self.tools, self.answers = [], {}
+            self._tell("tools", {})
+            self._tell("status", {})
 
     # ---------- the mode ----------
 
@@ -324,6 +449,46 @@ class BoxAgent:
                 log.exception("observer failed")
 
 
+def _bad_args(name: str, args: dict) -> bool:
+    """Part E's arguments, checked before anything is passed on."""
+    if name == "listen":
+        return (not isinstance(args.get("opening"), str) or not args["opening"]
+                or args.get("chime") not in (None, *SOUNDS) or args.get("light") not in (None, *PATTERNS))
+    if name == "play":
+        return args.get("sound") not in SOUNDS or args.get("channel", "alert") not in CHANNELS
+    if name == "stop":
+        return args.get("what") not in STOPS
+    if name == "record":
+        if args.get("action") == "start":
+            return not isinstance(args.get("meeting"), str) or not args["meeting"]
+        return args.get("action") != "stop"
+    return True
+
+
+def _fits(schema: dict, arguments: dict) -> bool:
+    """A small check of a tool's arguments against its schema: required fields, types,
+    enums and number ranges. Enough for the speaker's own tools."""
+    props = schema.get("properties") or {}
+    if any(r not in arguments for r in schema.get("required") or []):
+        return False
+    types = {"string": str, "integer": int, "number": (int, float), "boolean": bool}
+    for key, value in arguments.items():
+        rule = props.get(key)
+        if rule is None:
+            return False
+        want = types.get(rule.get("type"))
+        if want and (not isinstance(value, want) or (rule.get("type") != "boolean" and isinstance(value, bool))):
+            return False
+        if "enum" in rule and value not in rule["enum"]:
+            return False
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in rule and value < rule["minimum"]:
+                return False
+            if "maximum" in rule and value > rule["maximum"]:
+                return False
+    return True
+
+
 def network_via() -> str:
     """"wifi", "cable" or "" (no way out at all), from the routing table."""
     try:
@@ -337,10 +502,14 @@ def network_via() -> str:
     return ""
 
 
-def build(identity: Identity, cloud: str, *, disk: Disk | None = None, agent: BoxAgent | None = None, **link_args):
-    """Wire the team's link and claim layer to this box. Returns (link, claim, agent, disk)."""
+def build(identity: Identity, cloud: str, *, disk: Disk | None = None, agent: BoxAgent | None = None,
+          speaker: SpeakerPort | None = None, **link_args):
+    """Wire the team's link and claim layer to this box. Returns (link, claim, agent, disk).
+    With `speaker`, the box takes protocol 2's commands and passes them to the speaker."""
     disk = disk or Disk()
     agent = agent or BoxAgent()
+    if speaker is not None:
+        agent.attach_speaker(speaker)
     link = WebSocketLink(url=link_url(cloud), identity=identity, software=f"anve-device {ident.VERSION} / agent {AGENT_VERSION}",
                          **link_args)
     claim = CloudClaim(disk=disk, save=disk.save, first_secret=identity.claim_secret.reveal(), link=link)
@@ -365,8 +534,12 @@ async def run(cfg: dict):
     led = ActLed(b["led"]) if b["led"] else NoLed()
     agent = BoxAgent(led=led, mirror=Mirror(cfg["lumina"]["port"]) if cfg["lumina"]["enabled"] else None,
                      setup_open=lambda: not ident.provisioned(), network_via=network_via)
-    link, claim, agent, disk = build(identity, b["cloud"], agent=agent)
-    log.info("box %s: linking to %s (owner on record: %s)", identity.device_id, link.url, "yes" if disk.claimed else "no")
+    speaker = SpeakerPort(b["speaker_socket"]) if b.get("speaker_socket") else None
+    if speaker is not None:
+        await speaker.start()
+    link, claim, agent, disk = build(identity, b["cloud"], agent=agent, speaker=speaker)
+    log.info("box %s: linking to %s (owner on record: %s; protocol %d)", identity.device_id, link.url,
+             "yes" if disk.claimed else "no", 2 if speaker else 1)
     link.start()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -398,6 +571,8 @@ async def run(cfg: dict):
             pass
     agent._drop_overlay(tell=False)
     await link.stop()
+    if speaker is not None:
+        await speaker.stop()
     led.release()
 
 
