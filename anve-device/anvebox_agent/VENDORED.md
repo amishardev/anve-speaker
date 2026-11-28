@@ -1,12 +1,13 @@
-# Not included in the public copy
+# Copied from the ANVE Box repo, unchanged
 
-On the box this folder holds the ANVE Box team's own implementation of the box link
-(identity, signed hello, claim secret, connection), of box voice (`cloud/voice.py`) and of
-meeting recording (`cloud/meeting.py`), together with `tools/anvebox_factory.py`,
-`tools/talk.py` and `tools/meeting_record.py`, all copied unchanged from the team's
-repository. That repository is private, so the files are left
-out here. The same goes for the team's page assets in `portal/assets/` (`anve.css`,
-`icons.svg`, `led.js`, `fonts/`). Without them `anve_device/boxlink.py`, `boxvoice.py`, `meetings.py`,
-the setup page and their tests against the real cloud do not run from this copy;
-`tools/boxvoice_test.py` and `tools/meeting_test.py` use stand-ins and need only the
-import to resolve. Everything else runs.
+These files are exact copies from `github.com/ANVEAI/anve-box` at commit `0b56043` (27 Nov 2026; before that `f2c3c4e`, first copied at `d0de5c0`)
+(`device/anvebox_agent/`): `__init__.py`, `identity.py`, `redact.py`, `model.py`,
+`lights.py`, `cloud/__init__.py`, `cloud/base.py`, `cloud/claim.py`, `cloud/link.py`, `cloud/voice.py` (box voice, part C), `cloud/meeting.py` (meetings, part D).
+`tools/anvebox_factory.py` is `tools/factory/factory.py` and `tools/talk.py` is
+`tools/box-voice/talk.py`, and `tools/meeting_record.py` is `tools/box-meeting/record.py`,
+from the same repo.
+
+They are the team's own implementation of the box link (docs/box-cloud-agreement.md,
+part A): the identity, the signed hello, the claim secret and the connection. Do not
+edit them here. To take a newer version, copy the files again and update the commit
+above. The speaker's own side of the link is `anve_device/boxlink.py`.
