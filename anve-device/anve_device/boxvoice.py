@@ -74,6 +74,7 @@ class BoxVoice:
         self._new_request = True                           # the next `heard` starts a request
         self._last_heard = self._turn_t = 0.0
         self._heard_any = False
+        self._cloud_ends = False                           # `ready` said ends: "cloud" (part C, D103)
         self._stop = asyncio.Event()
 
     # ---------- the old client's face ----------
@@ -100,6 +101,11 @@ class BoxVoice:
         if t in ("wake", "ptt.start"):
             await self._open()
             return True
+        if t == "listen":
+            # protocol 2: the cloud's `listen`, a talk ANVE opens with its token
+            if self.talk is not None and self.talk.ended is None:
+                return False                               # a talk is on already
+            return await self._open(opening=str(obj.get("opening") or "")) is not False
         if t == "interrupt":
             self._drop_sound = True
             await self._hang_up()
@@ -119,7 +125,7 @@ class BoxVoice:
 
     # ---------- one talk ----------
 
-    async def _open(self):
+    async def _open(self, opening: str = ""):
         if self.talk is not None and self.talk.ended is None:
             # woken again inside a talk (talking over ANVE): the same talk goes on
             self._drop_sound = True
@@ -131,8 +137,15 @@ class BoxVoice:
         self._sent_s, self._ready_t = 0.0, 0.0
         self._drop_sound, self._new_request, self._heard_any = False, True, False
         self._last_heard = self._turn_t = 0.0
+        self._cloud_ends = False
+        try:
+            extra = {"opening": opening} if opening else {}
+            talk = self._factory(self.cloud, self.identity, on_sound=self._on_sound, on_event=self._on_event, **extra)
+        except TypeError:
+            log.warning("this copy of the team's anvebox_agent is older than protocol 2: copy it again")
+            return False
         self.sessions_opened += 1
-        self.talk = self._factory(self.cloud, self.identity, on_sound=self._on_sound, on_event=self._on_event)
+        self.talk = talk
         self._opened_t = time.monotonic()
         self._task = asyncio.create_task(self._run_talk(self.talk))
         self._pump = asyncio.create_task(self._pump_mic(self.talk))
@@ -166,7 +179,7 @@ class BoxVoice:
             # "ANVE, record this meeting": the cloud started one and ended the talk (part D
             # of the agreement). The speaker now records the room for it (meetings.py).
             await self._emit({"type": "meeting.start", "meeting": ended.get("meeting")})
-        elif reason not in ("hung_up",) and text:
+        elif reason not in ("hung_up", "quiet") and text:
             # something the person should know: not added to an account, the owner is
             # already talking to ANVE in the app, the cloud cannot be reached, ...
             await self._emit({"type": "notice", "level": "error" if reason in ("refused", "unreachable", "failed", "dropped") else "info",
@@ -202,6 +215,8 @@ class BoxVoice:
                 now = time.monotonic()
                 if not talk.ready.is_set():
                     continue
+                if self._cloud_ends:
+                    continue                             # part C, D103: the cloud ends this talk
                 if self.room_busy():
                     if self._turn_t:
                         self._turn_t = now               # the window starts when the room is quiet
@@ -256,6 +271,7 @@ class BoxVoice:
         t = ev.get("type")
         if t == "ready":
             self._ready_t = time.monotonic()
+            self._cloud_ends = ev.get("ends") == "cloud"
             log.info("ANVE is listening (%.1f s after the wake word; this talk may last %s s)",
                      self._ready_t - self._opened_t, ev.get("limit"))
             await self._say_state("listening")
@@ -285,6 +301,9 @@ class BoxVoice:
         elif t in ("action", "rule"):
             log.info("ANVE %s", "did something" if t == "action" else "proposed a rule")
             await self._emit({"type": "tool.result", "name": t, "ok": True, "status": "done"})
+        elif t == "working":
+            # ANVE is busy with something that takes a while: the soft thinking pulse
+            await self._emit({"type": "tool.call", "name": "working"})
         elif t == "warning":
             log.info("a minute of this talk is left")
         # "chat", "ended" (handled when run() returns) and unknown types: nothing to do

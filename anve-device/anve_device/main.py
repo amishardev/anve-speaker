@@ -60,6 +60,7 @@ MEETING_HOLD_STOP_S = 1.5          # ... and held this long during a meeting sto
 class Device:
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        self.body = None                              # protocol 2 (boxbody.py), with the ANVE Box cloud
         s, a, w = cfg["server"], cfg["audio"], cfg["wake"]
         v = cfg.get("voice") or {}
         if v.get("backend") == "anve-box":
@@ -71,6 +72,10 @@ class Device:
                                    on_json=self.on_json, on_audio=self.on_audio, on_link=self.on_link,
                                    room_busy=lambda: time.monotonic() < self.reply_until)
             log.info("voice: the ANVE Box cloud (%s), one connection per talk", cfg["boxlink"]["cloud"])
+            if cfg["boxlink"].get("speaker_socket"):
+                # protocol 2: the cloud runs the box's body through the box link (boxbody.py)
+                from .boxbody import BoxBody
+                self.body = BoxBody(self, cfg["boxlink"]["speaker_socket"], cfg["lumina"].get("dashboard_port", 8742))
         else:
             self.client = Client(s["url"], s["key_file"], engine=s["engine"], mode=s["mode"],
                                  speak=s["speak"], codec=s["codec"], on_json=self.on_json,
@@ -159,6 +164,7 @@ class Device:
         self.meeting = None
         self.meeting_origin = 0
         self._meeting_task = None
+        self._meeting_starting = False                # a start is under way (the voice and the cloud may both ask)
 
     # ---------- LEDs ----------
 
@@ -185,6 +191,8 @@ class Device:
         self._look = look
         if self.ring:
             self.ring.set(look, cloud=bool(self.srv.get("cloud")) or self.ptt)
+        if self.body:
+            self.body.report()                        # what the box is doing, for the cloud (protocol 2)
 
     # ---------- server -> device ----------
 
@@ -284,6 +292,8 @@ class Device:
         if not self.media:
             return None
         intent = nlu.understand(text, self._ctx())
+        if intent and intent["do"] == "volume" and self.body and self.body.offers("set_volume"):
+            return None                               # ANVE does it with the box's own tool (D113)
         if intent and intent["do"] == "time" and not getattr(self.client, "can_type", True):
             # The ANVE Box cloud's Gemini knows the local time (asked 24 Nov 2026 at 15:04
             # IST, it said "3:04 PM") and says it in its own voice. The speaker's own clock
@@ -947,6 +957,8 @@ class Device:
         if d["wake"] and start != self.last_wake_start:
             self.last_wake_start = start
             self.stats["wakes"] += 1
+            if self.body:
+                self.body.wake()
             if speaking:
                 self.playback.flush()
                 self.reply_until = 0.0
@@ -985,6 +997,20 @@ class Device:
             await self.media.pause()
         self.look()
 
+    async def open_talk(self, opening: str):
+        """The cloud's `listen` (protocol 2): a talk in which ANVE speaks first, such as
+        "your deck is ready". After that it is an ordinary talk."""
+        if self.media:
+            await self.media.duck()
+        if not await self.client.send({"type": "listen", "opening": opening}):
+            log.info("the talk ANVE asked for could not be opened")
+            return
+        self.turn.start(waiting=True, loud_ok=not self._media_on())
+        self.send_from = self.index
+        self.streaming, self.wake_t = True, time.monotonic()
+        self.segmenter.reset()
+        self.look()
+
     # ---------- meetings (the ANVE Box cloud; meetings.py) ----------
 
     def _clip(self, name: str) -> bytes:
@@ -999,12 +1025,21 @@ class Device:
         self.reply_until = time.monotonic() + self.playback.remaining()
 
     async def meeting_start(self, meeting_id: str | None, how: str) -> str:
-        """Start recording the room. `meeting_id`: from the voice talk that asked for it,
-        or None for a new meeting (the button, the control page). Returns "" or why not."""
+        """Start recording the room. `meeting_id`: from the voice talk or the cloud's
+        `record`, or None for a new meeting (the button, the control page). Returns "" or
+        why not. With protocol 2 the voice's "record this meeting" and the cloud's `record`
+        both arrive for the same meeting: the second finds the first under way."""
+        if self.meeting or self._meeting_starting:
+            return "a meeting is already being recorded"
+        self._meeting_starting = True
+        try:
+            return await self._meeting_start(meeting_id, how)
+        finally:
+            self._meeting_starting = False
+
+    async def _meeting_start(self, meeting_id: str | None, how: str) -> str:
         from . import meetings
         mc = self.cfg["meetings"]
-        if self.meeting:
-            return "a meeting is already being recorded"
         if not mc["enabled"] or not hasattr(self.client, "identity"):
             log.info("a meeting was asked for (%s), but recording needs the ANVE Box cloud", how)
             return "recording a meeting needs the ANVE Box cloud ([voice] backend = \"anve-box\")"
@@ -1167,6 +1202,13 @@ class Device:
                     and self.cfg["meetings"]["enabled"] and hasattr(self.client, "identity"):
                 self.action_t = 0.0
                 self.ptt = False
+                if self.body and self.body.on:
+                    # protocol 2 (D114): the cloud decides, and starts the meeting with `record`
+                    log.info("button held for %.0f s: the cloud is told (it starts the meeting)", MEETING_HOLD_START_S)
+                    await self.client.send({"type": "interrupt"})
+                    self.look()
+                    if self.body.long_press():
+                        return
                 log.info("button held for %.0f s: start a meeting", MEETING_HOLD_START_S)
                 await self.meeting_start(None, "by a long press")
 
@@ -1253,6 +1295,8 @@ class Device:
             self.media_watch(), self._meeting_leftovers())]
         if self.app:
             tasks.append(asyncio.create_task(self.app.run()))
+        if self.body:
+            tasks.append(asyncio.create_task(self.body.run()))
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)

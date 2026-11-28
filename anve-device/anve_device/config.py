@@ -63,12 +63,14 @@ DEFAULTS = {
     },
     # the light strip: LUMINA (lumina/) draws it, the speaker reports its state to it.
     # [leds] is the older built-in driver, used only when lumina is switched off.
-    "lumina": {"enabled": True, "port": 8741},
+    "lumina": {"enabled": True, "port": 8741, "dashboard_port": 8742},
     "leds": {"enabled": True, "count": 30, "brightness": 0.35},
     # the link to the ANVE Box cloud (boxlink.py; github.com/ANVEAI/anve-box, protocol 1).
     # led: the Pi LED that plays the cloud's "blink" commands ("" = none)
     # cloud: the ANVE Box cloud on Google Cloud (box-cloud.example since 27 Nov 2026; the team's handoffs, D35-D39, D95-D98)
-    "boxlink": {"enabled": True, "cloud": "https://box-cloud.example", "led": "ACT"},
+    # speaker_socket: where the box link and the speaker talk (protocol 2, speakerlink.py); "" = protocol 1 only
+    "boxlink": {"enabled": True, "cloud": "https://box-cloud.example", "led": "ACT",
+                "speaker_socket": "/run/anvebox/speaker.sock"},
     # Where "Hey ANVE" is answered. "anve-box": the ANVE Box cloud's Gemini voice, one
     # connection per talk at [boxlink] cloud, proved with the box's own identity
     # (boxvoice.py). "platform": the old ANVE platform ([server] url, the device key).

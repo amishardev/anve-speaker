@@ -151,7 +151,8 @@ async def main():
     link, claim, agent, disk = boxlink.build(identity, base, disk=disk, agent=agent, timings=FAST)
     link.start()
     await wait(lambda: cloud.rejections >= 2)
-    check("is turned away (4401) and keeps trying, politely", cloud.rejections >= 2 and "doesn't know this box" in (link.last_problem or ""))
+    check("is turned away (4401) and keeps trying, politely", cloud.rejections >= 2
+          and any(w in (link.last_problem or "") for w in ("doesn't know this box", "refused this box")))
     check("meanwhile its mode is CONNECTING, with the fast blink", agent.status()["mode"] == "CONNECTING" and agent.status()["light"] == "fast_blink")
     check("the first claim secret is on disk already, readable by its owner only",
           json.loads(disk.path.read_text())["claim_secret"] == identity.claim_secret.reveal()
