@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import config as C
+from . import nlu
 from . import skills
 from .appapi import AppApi, pair_file
 from .audio import Capture, nodes
@@ -31,7 +32,7 @@ from .client import Client
 from .dsp import Agc
 from .playback import EARCONS, EchoCancel, Playback, tone
 from .turn import Turn
-from .wake import RATE, Segmenter, SileroVAD, Spotter
+from .wake import RATE, Burst, Enrolled, Head, Segmenter, SileroVAD, Spotter
 
 log = logging.getLogger("anve.device")
 FRAME = 640
@@ -39,9 +40,10 @@ SILENCE = bytes(FRAME * 2)          # one 40 ms frame of digital silence
 
 
 #: a sentence that begins like an order to the speaker itself (music, its browser)
-COMMAND_LIKE = re.compile(r"\W*(hey anve\W+)?(please |can you |could you |will you )?"
+COMMAND_LIKE = re.compile(r"\W*((hey|hi|ok|okay) [\w']+\W+)?(please |can you |could you |will you )?"
                           r"(play|pause|stop|resume|skip|next|open|volume|put on|turn (it|the)|"
-                          r"(set|change|make) (the )?(speaker )?volume)\b", re.I)
+                          r"(set|change|make|increase|decrease|raise|lower|reduce|turn up|turn down) "
+                          r"(the )?(speaker )?volume)\b", re.I)
 
 
 def _be_nice():
@@ -51,13 +53,28 @@ def _be_nice():
         pass
 
 
+MEETING_HOLD_START_S = 3.0         # the action button held this long starts a meeting
+MEETING_HOLD_STOP_S = 1.5          # ... and held this long during a meeting stops it
+
+
 class Device:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         s, a, w = cfg["server"], cfg["audio"], cfg["wake"]
-        self.client = Client(s["url"], s["key_file"], engine=s["engine"], mode=s["mode"],
-                             speak=s["speak"], codec=s["codec"], on_json=self.on_json,
-                             on_audio=self.on_audio, on_link=self.on_link)
+        v = cfg.get("voice") or {}
+        if v.get("backend") == "anve-box":
+            # the ANVE Box cloud's Gemini voice: one connection per talk (boxvoice.py)
+            from .boxlink import load_identity
+            from .boxvoice import BoxVoice
+            self.client = BoxVoice(cfg["boxlink"]["cloud"], load_identity(),
+                                   follow_up_s=float(v.get("follow_up_s", 8)),
+                                   on_json=self.on_json, on_audio=self.on_audio, on_link=self.on_link,
+                                   room_busy=lambda: time.monotonic() < self.reply_until)
+            log.info("voice: the ANVE Box cloud (%s), one connection per talk", cfg["boxlink"]["cloud"])
+        else:
+            self.client = Client(s["url"], s["key_file"], engine=s["engine"], mode=s["mode"],
+                                 speak=s["speak"], codec=s["codec"], on_json=self.on_json,
+                                 on_audio=self.on_audio, on_link=self.on_link)
         self.ec = EchoCancel(a["mic"], a["speaker"], noise_suppression=a["noise_suppression"],
                              on_state=self.on_devices, on_loaded=self.on_canceller)
         self.capture = Capture(EchoCancel.SOURCE)
@@ -66,7 +83,26 @@ class Device:
         self.agc = Agc(a["agc_target_db"], a["agc_max_gain_db"])
         self.vad = SileroVAD()
         self.segmenter = Segmenter(early_s=w["early_s"], own_vad=False)
-        self.spotter = Spotter(w["model"], w["threads"], tokens=w["tokens"])
+        # the owner's recorded "Hey ANVE" (tools/wake_enroll.py); no file = text rules only
+        enrolled = Enrolled(Path(__file__).resolve().parent.parent / w["enrol_file"],
+                            w["enrol_whole"], w["enrol_prefix"]) if w.get("enrol_file") else None
+        if enrolled and enrolled.templates:
+            log.info("wake word: also matching %d recordings of the owner's voice", len(enrolled.templates))
+        stop = Enrolled(Path(__file__).resolve().parent.parent / w["stop_file"],
+                        w["enrol_whole"], w["enrol_prefix"]) if w.get("stop_file") else None
+        if stop and stop.templates:
+            log.info("ANVE stop: matching %d recordings of the owner's voice", len(stop.templates))
+        self.spotter = Spotter(w["model"], w["threads"], tokens=w["tokens"], enrolled=enrolled, stop=stop)
+        if w.get("model_file"):
+            self.spotter.head = Head(Path(__file__).resolve().parent.parent / w["model_file"])
+            self.spotter.head_limit, self.spotter.head_live = w["model_limit"], bool(w["model_live"])
+            if self.spotter.head.session is not None:
+                log.info("wake word: trained model loaded (limit %.2f, %s)", w["model_limit"],
+                         "live" if w["model_live"] else "shadow: it only reports, it wakes nothing")
+        self.last_intent, self.last_intent_t = None, 0.0     # for "thoda aur", "again"
+        self.heard_buf = deque(maxlen=150)
+        self._stop_task = None
+        self.burst = Burst()                          # a voice standing out of our own music
         # The wake-word decodes run at low priority (nice 10): sound in and out must never
         # wait for them. Heard as stutter in music before this. The model's own worker
         # threads are created from this thread and inherit its priority.
@@ -93,7 +129,8 @@ class Device:
         self.last_wake_start = -1
         self.wake_t = 0.0
         # skills the speaker runs itself (its own browser, music), and thinking sounds
-        self.media = skills.Media(cfg["skills"].get("duck", 0.3), cfg["skills"].get("muffle", True)) \
+        self.media = skills.Media(cfg["skills"].get("duck", 0.3), cfg["skills"].get("muffle", True),
+                                  cfg["skills"].get("music_max", 0.0)) \
             if cfg["skills"]["enabled"] else None
         self.fillers = skills.Fillers() if cfg["thinking"]["mode"] == "voice" else None
         self.heard = ""                               # this request, as ANVE reports it
@@ -117,6 +154,11 @@ class Device:
         self._look = "idle"
         # the phone app's API on the local network (appapi.py)
         self.app = AppApi(self, cfg) if cfg["app"]["enabled"] else None
+        # a meeting being recorded in the room (meetings.py): the recorder, and where on
+        # the microphone's sample counter it began
+        self.meeting = None
+        self.meeting_origin = 0
+        self._meeting_task = None
 
     # ---------- LEDs ----------
 
@@ -229,6 +271,47 @@ class Device:
                     self.playback.play(self._ticks[n % 2])
                 await asyncio.sleep(0.85)
 
+    def _ctx(self) -> dict:
+        """What the speaker is doing, for nlu.understand: the same words mean different
+        things with music on, with music paused, or right after a volume change."""
+        m = self.media
+        playing = bool(m and (m.playing or m.ducked))
+        return {"playing": playing,
+                "paused": bool(m and not playing and m.browser.has_media),
+                "last": self.last_intent, "age": time.monotonic() - self.last_intent_t}
+
+    def _understand(self, text: str) -> dict | None:
+        if not self.media:
+            return None
+        intent = nlu.understand(text, self._ctx())
+        if intent and intent["do"] == "time" and not getattr(self.client, "can_type", True):
+            # The ANVE Box cloud's Gemini knows the local time (asked 24 Nov 2026 at 15:04
+            # IST, it said "3:04 PM") and says it in its own voice. The speaker's own clock
+            # line was only for the old platform, which answered "4 PM" at 5:15 PM; on this
+            # cloud it could only be spoken by the plain built-in voice.
+            return None
+        if not intent:
+            old = skills.parse(text)                  # the browser orders: "open ...", "search ..."
+            intent = old if old and old["do"] in ("open", "search") else None
+        return intent
+
+    async def _say_exactly(self, line: str, why: str):
+        """ANVE's voice says one line the speaker worked out itself (a typed turn)."""
+        await asyncio.sleep(0.3)                      # let the interrupted answer stop
+        if not getattr(self.client, "can_type", True):
+            await self._say_locally(line)             # the ANVE Box cloud takes no typed turns
+            return
+        await self.client.send({"type": "text", "text":
+                                f"[From the speaker device] {why}, so call no tool and do not correct it. "
+                                f"Say exactly these words and nothing before or after them: {line}"})
+
+    async def _say_locally(self, line: str):
+        """The speaker's own (plain) voice, for a line no cloud voice can say for it."""
+        log.info("the speaker says a line itself (%d characters)", len(line))
+        clip = await asyncio.to_thread(skills.render, line)
+        self.playback.play(clip or tone(EARCONS["end"]))
+        self.reply_until = time.monotonic() + self.playback.remaining()
+
     async def _maybe_skill(self):
         """Is this request one the speaker handles itself (music, its browser)?"""
         # The transcript arrives in pieces. Acting on the first piece once turned "Play
@@ -240,7 +323,7 @@ class Device:
         if self.heard != before:
             return
         text = self.heard.strip()
-        intent = skills.parse(text) if self.media else None
+        intent = self._understand(text)
         if not intent and COMMAND_LIKE.match(text):
             # a command to the device itself that was not understood: worth seeing
             log.info("device-style request left to ANVE: %r", text[:90])
@@ -265,7 +348,40 @@ class Device:
             line = f"Playing {intent['query']}."
         elif intent["do"] == "radio":
             line = f"Playing {skills.RADIO.get(intent.get('station'), skills.RADIO['default'])[0]}."
-        if line and self.cfg["skills"].get("announce", True):
+        if intent["do"] in ("volume", "next"):        # what "more" / "again" will refer to
+            self.last_intent, self.last_intent_t = intent, time.monotonic()
+        if intent["do"] == "time":
+            # the cloud does not know this device's local time: ANVE says the Pi's clock
+            await self._say_exactly(skills.time_line(), "The speaker read its own clock")
+            return
+        if intent["do"] == "maker":
+            # "Who made you?" The owner asked for this answer, and only when someone asks.
+            # Where the cloud takes no typed turns it is a recorded line in a natural voice
+            # (sounds/maker.pcm: Kokoro "af_heart", Apache-2.0), not the plain built-in one.
+            line = "I was made by Amish Sharma."
+            clip = b""
+            if not getattr(self.client, "can_type", True):
+                try:
+                    clip = (Path(__file__).resolve().parent / "sounds" / "maker.pcm").read_bytes()
+                except OSError:
+                    pass
+            if clip:
+                await asyncio.sleep(0.3)
+                self.playback.play(clip)
+                self.reply_until = time.monotonic() + self.playback.remaining()
+            else:
+                await self._say_exactly(line, "The speaker knows who built it")
+            return
+        if intent["do"] == "nowplaying":
+            now = self.media.now()
+            await self._say_exactly(f"This is {now['title']}." if now else "Nothing is playing right now.",
+                                    "The speaker looked at its own music player")
+            return
+        if intent["do"] == "volume_query":
+            await self._say_exactly(f"The volume is {round(self.cfg['audio']['speaker_volume'] * 100)} percent.",
+                                    "The speaker read its own volume")
+            return
+        if line and self.cfg["skills"].get("announce", True) and getattr(self.client, "can_type", True):
             await asyncio.sleep(0.3)                  # let the interrupted answer stop
             # reply audio stays discarded until the server echoes this typed turn back
             # (see transcript.in): nothing of the interrupted answer can slip through
@@ -301,6 +417,7 @@ class Device:
             await asyncio.sleep(5)
             if not self.media.ducked:
                 await self.media.refresh()
+                await self.media.recap()
 
     async def _unduck_when_quiet(self):
         """The conversation is over: bring the music back if we paused it for it."""
@@ -382,7 +499,8 @@ class Device:
             else:
                 self.heard += str(m.get("text") or "")
                 if self.media:
-                    if not self.holding and COMMAND_LIKE.match(self.heard):
+                    if not self.holding and (COMMAND_LIKE.match(self.heard)
+                                             or self._understand(self.heard)):
                         self.holding, self.hold_t, self.held = True, time.monotonic(), []
                         self.playback.flush()         # cut a "Sorry" that already started
                         self.reply_until = 0.0
@@ -421,11 +539,19 @@ class Device:
         elif t == "notice":
             log.info("notice (%s%s): %s", m.get("level"),
                      ", announcement" if m.get("announce") else "", str(m.get("text"))[:200])
+            if m.get("announce") and not getattr(self.client, "can_type", True):
+                # the ANVE Box cloud ended a talk with something the person must know
+                # ("this box isn't added to an account yet", "busy", cannot be reached)
+                self.playback.flush()
+                asyncio.create_task(self._say_locally(str(m.get("text"))[:200]))
         elif t == "notices":
             for it in m.get("items") or []:
                 log.info("waiting notice: %s", str(it)[:200])
         elif t == "job":
             log.info("job %s %s: %s", m.get("kind"), m.get("id"), m.get("status"))
+        elif t == "meeting.start":
+            # "ANVE, record this meeting": the voice talk ended by starting one (boxvoice.py)
+            asyncio.create_task(self.meeting_start(m.get("meeting"), "by voice"))
         elif t == "ready":
             if not m.get("voice_confirm"):
                 log.info("room device: spoken confirmations are refused; use the screen")
@@ -493,6 +619,11 @@ class Device:
                                capture_output=True)
                 subprocess.run(["wpctl", "set-mute", str(n["id"]), "0"], capture_output=True)
                 log.info("speaker volume set to %.0f %%", want * 100)
+        if self.media:
+            self.media.set_speaker(want)
+            if self.media.cap < 1.0:
+                log.info("music is held to the loudness of %.0f %% (the microphone overloads above it)",
+                         self.media.music_max * 100)
 
     async def bluetooth_keeper(self):
         mac = self.cfg["audio"]["bluetooth_mac"]
@@ -561,8 +692,20 @@ class Device:
             frame = self.agc.process(raw, speech, gate_open=prob >= 0.15 and not under_music,
                                      strict=under_music)
             heard = self.agc.ungated
+            self.heard_buf.append(heard)             # the last 6 s, ungated (see _stop_watch)
             idx = self.index
             self.index += FRAME
+            if self.meeting:
+                # A meeting is being recorded: every frame goes to it, nothing goes to a
+                # voice talk, and the wake word is only listened for so that "mark that"
+                # and "stop recording" can be passed on (see _spot_one).
+                self.meeting.feed(heard)
+                if self.ring:
+                    self.ring.level(self.agc.meter())
+                for kind, pcm, start in self.segmenter.feed(heard, idx, speech):
+                    if not (kind == "final" and start == self.last_wake_start):
+                        self._spot_or_wait(pcm, start, False)
+                continue
             # for turn-taking: is this speech, or silence (no speech AND down at the room's
             # own noise)? Decided now, used when the delayed uplink frame comes out.
             self._flags.append((self.agc.speech, not self.agc.speech and self.agc.level_in <= self.agc.floor + 6.0))
@@ -609,6 +752,9 @@ class Device:
                     continue
                 self._spot_or_wait(pcm, start, False)
             if self._media_on():
+                # a short sound that stands out of the music: is it the owner's phrase?
+                for pcm, start in self.burst.feed(heard, idx):
+                    self._spot_or_wait(pcm, start, "burst")
                 # A song keeps the "speech" going, so "Hey ANVE" never starts a segment.
                 # While music plays, also check the last 3 s every 2 s for the wake
                 # phrase anywhere in it (the phrase is under 1 s, the overlap is 1 s).
@@ -622,6 +768,7 @@ class Device:
                     self._spot_or_wait(pcm, idx + FRAME - len(pcm) // 2, True)
             elif self.win:
                 self.win.clear()
+                self.burst.reset()
 
     def _spot_or_wait(self, pcm: bytes, start: int, anywhere: bool):
         """Give a piece of sound to the recogniser, or keep it until the recogniser is free.
@@ -638,8 +785,8 @@ class Device:
             asyncio.create_task(self._spot(pcm, start, anywhere))
             return
         if self.spot_next is not None:
-            if anywhere and not self.spot_next[2]:
-                return                                       # a window never replaces a segment
+            if anywhere is True and self.spot_next[2] is not True:
+                return                         # a window never replaces a segment or a burst
             self.stats["replaced"] += 1
         self.spot_next = (pcm, start, anywhere)
         self.stats["waited"] += 1
@@ -673,35 +820,128 @@ class Device:
             folder = Path(__file__).resolve().parent.parent / "recordings" / "live"
             folder.mkdir(parents=True, exist_ok=True)
             name = time.strftime("%H%M%S") + ("-wake" if d["wake"] else "-veto" if d["vetoed"] else "-no") + \
-                ("-music" if anywhere else "") + ".wav"
+                ("-burst" if anywhere == "burst" else "-music" if anywhere else "") + ".wav"
             with wave.open(str(folder / name), "wb") as w:
                 w.setnchannels(1)
                 w.setsampwidth(2)
                 w.setframerate(16000)
                 w.writeframes(pcm)
-            for old in sorted(folder.glob("*.wav"))[:-150]:
+            # oldest by file time, not by name: names are the time of day, so yesterday
+            # evening's clips sorted after today's and every new clip was deleted at once
+            for old in sorted(folder.glob("*.wav"), key=lambda p: p.stat().st_mtime)[:-400]:
                 old.unlink(missing_ok=True)
-            log.info("diag %s: %.1f s, %d ms, heard %r", name, len(pcm) / 32000, d["ms"], d["text"][:80])
+            mt = d.get("match")
+            if d.get("model") is not None:
+                name = name.replace(".wav", "-m%02d.wav" % int(d["model"] * 99))
+            if d.get("stop_music"):
+                name = name.replace("-no", "-stop")
+            log.info("diag %s: %.1f s, %d ms, heard %r%s", name, len(pcm) / 32000, d["ms"], d["text"][:80],
+                     (" voice match %.3f / %.3f" % (mt["whole"], mt["prefix"]) if mt else "") +
+                     (" stop match %.3f" % d["stop_match"]["whole"] if d.get("stop_match") else "") +
+                     (" model %.2f" % d["model"] if d.get("model") is not None else ""))
         except OSError:
             pass
 
+    async def _stop_music_now(self, why: str):
+        log.info("stop heard (%s): music stopped", why)
+        await self.media.pause()
+        self.media.ducked = False
+        self.playback.flush()
+        self.playback.play(tone(EARCONS["end"]))
+        # the cloud is listening to the same words: its answer to them is not wanted
+        self.drop_reply_until = time.monotonic() + 6
+        try:
+            await self.client.send({"type": "interrupt"})
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    async def _stop_watch(self):
+        """Woken while our own music plays: listen here, on the device, for "stop".
+
+        Until 23 Nov 2026 only the cloud listened after the wake, and it never got the
+        words: under music the speaker waits for the speech detector to say "they have
+        started", which it did not, so after 4 s it gave up ("I didn't catch that") with
+        the song still playing. Five times out of six in the owner's evening. The music
+        is turned down and muffled by now, so a short order is readable: the last 3 s
+        are decoded 1.2, 2.2, 3.3 and 4.5 s after the wake (which also covers "Hey ANVE
+        stop the music" said in one breath), and a stop word pauses the music at once."""
+        try:
+            for wait in (1.2, 1.0, 1.1, 1.2):
+                await asyncio.sleep(wait)
+                if not self.media or not (self.media.playing or self.media.ducked):
+                    return
+                pcm = b"".join(self.heard_buf)
+                word = await asyncio.get_running_loop().run_in_executor(
+                    self.pool, self.spotter.says_stop, pcm)
+                if word:
+                    if self.media.playing or self.media.ducked:
+                        await self._stop_music_now("after the wake word")
+                    return
+        except Exception:                                    # noqa: BLE001
+            log.exception("the stop watch failed")
+
     async def _spot_one(self, pcm: bytes, start: int, anywhere: bool = False):
         try:
-            d = await asyncio.get_running_loop().run_in_executor(
-                self.pool, self.spotter.detect, pcm, anywhere)
+            if anywhere == "burst":
+                d = await asyncio.get_running_loop().run_in_executor(
+                    self.pool, self.spotter.detect_burst, pcm, self.cfg["wake"]["enrol_music"])
+            elif anywhere and self.spotter.enrolled and self.spotter.enrolled.templates:
+                d = await asyncio.get_running_loop().run_in_executor(
+                    self.pool, self.spotter.detect_window, pcm, self.cfg["wake"]["enrol_window"])
+            else:
+                d = await asyncio.get_running_loop().run_in_executor(
+                    self.pool, self.spotter.detect, pcm, anywhere)
         except Exception:                                    # noqa: BLE001
             log.exception("wake spotter failed")
             return
         self.stats["spot_ms"].append(d["ms"])
+        if self.meeting:
+            # Recording a meeting: the speaker does not join the conversation. The wake
+            # word only means "the next 3 s may be an order for the recording". Nothing
+            # of a meeting is ever kept by the wake diagnostics.
+            now = time.monotonic()
+            if d["wake"] and start != self.last_wake_start and now - self.wake_t > 4.0:
+                self.last_wake_start, self.wake_t = start, now
+                asyncio.create_task(self._meeting_command(start + int(d["end_s"] * RATE)))
+            return
         if self._diagnosing():
             self._diag_keep(pcm, d, anywhere)
+            # recording the owner's phrases (tools/wake_diag.sh record): keep the clip and
+            # do nothing with it, so a phrase being recorded does not wake the speaker
+            if (pair_file().parent / "record-only").exists():
+                return
         # what the room said stays out of the journal unless someone asks for DEBUG
         log.debug("spotter: %.1f s segment, %d ms, wake=%s barge=%s vetoed=%s heard %r",
                   len(pcm) / 32000, d["ms"], d["wake"], d["barge"], d["vetoed"], d["text"][:80])
         if self.muted or self.ptt or self.recording or not self.link or \
                 (self.streaming and not self._media_loud()):
             return
+        if d.get("model") is not None and not self.spotter.head_live and                 (d["model"] >= self.spotter.head_limit) != bool(d["wake"]):
+            # shadow mode: where the trained model and today's rules disagree, say so
+            # (numbers only, no words) so the model can be judged before it may wake
+            log.info("model %.2f, rules %s (%.1f s clip)", d["model"],
+                     "woke" if d["wake"] else "did not wake", len(pcm) / 32000)
+        if anywhere == "burst" and not d["wake"] and d.get("match") and len(pcm) >= int(1.2 * RATE) * 2                 and d["match"]["prefix"] <= self.cfg["wake"]["enrol_music"] + 0.05                 and self.media and self.media.playing and not self.media.ducked and not self.streaming:
+            # a longer burst out of the music that BEGINS rather like the owner's phrase:
+            # "Hey ANVE stop the music" in one breath? Read it; a stop word settles it.
+            word = await asyncio.get_running_loop().run_in_executor(self.pool, self.spotter.says_stop, pcm)
+            if word:
+                await self._stop_music_now("in one breath with the name, %.3f" % d["match"]["prefix"])
+                return
+        if d.get("stop_music") or (d["barge"] and not d["wake"] and time.monotonic() >= self.reply_until):
+            # "stop" in the owner's voice, or written out by the recogniser ("stop",
+            # "ANVE stop") from anyone: the music stops here and now
+            if self.media and (self.media.playing or self.media.ducked):
+                log.info("stop heard (%s): music stopped",
+                         "owner's voice %.3f" % d["stop_match"]["whole"] if d.get("stop_music") else "as text")
+                await self.media.pause()
+                self.media.ducked = False
+                self.playback.play(tone(EARCONS["end"]))
+                return
         speaking = time.monotonic() < self.reply_until
+        by_voice = bool(d.get("match") and d["match"]["hit"])
+        if by_voice and speaking:
+            return                # while ANVE talks, only the written phrase interrupts it
         if d["wake"] and time.monotonic() - self.wake_t < 4.0:
             return                # the same "Hey ANVE", caught again in an overlapping window
         if d["wake"] and start != self.last_wake_start:
@@ -715,8 +955,10 @@ class Device:
             # the listening chime, at once: no waiting for the server to ask for it
             self.playback.play(tone(EARCONS["wake"]))
             self.chimed_at = time.monotonic()
-            log.info("wake word (score %.2f, decode %d ms%s)", d["score"], d["ms"],
-                     ", barge-in" if speaking else "")
+            log.info("wake word (score %.2f, decode %d ms%s%s)", d["score"], d["ms"],
+                     ", barge-in" if speaking else "",
+                     ", by the owner's voice %.3f / %.3f" % (d["match"]["whole"], d["match"]["prefix"])
+                     if by_voice else "")
             await self.client.send({"type": "wake", "word": self.cfg["wake"]["word"],
                                     "score": d["score"]})
             # nothing is sent until the request begins; over music only a voice counts as a start
@@ -724,6 +966,10 @@ class Device:
             self.send_from = start + int(d["end_s"] * RATE)
             self.streaming, self.wake_t = True, time.monotonic()
             self.segmenter.reset()
+            if self.media and (self.media.playing or self.media.ducked):
+                # woken over our own music: "stop" is the likeliest thing to follow
+                if self._stop_task is None or self._stop_task.done():
+                    self._stop_task = asyncio.create_task(self._stop_watch())
             if self.ring:
                 self.ring.flash((255, 255, 255), 0.15)
         elif speaking and (d["barge"] or d["stop_word"]):
@@ -738,6 +984,135 @@ class Device:
             self.media.ducked = False
             await self.media.pause()
         self.look()
+
+    # ---------- meetings (the ANVE Box cloud; meetings.py) ----------
+
+    def _clip(self, name: str) -> bytes:
+        """A recorded line or sound from sounds/ (24 kHz PCM); empty if it is not there."""
+        try:
+            return (Path(__file__).resolve().parent / "sounds" / f"{name}.pcm").read_bytes()
+        except OSError:
+            return b""
+
+    def _play_line(self, name: str, fallback=EARCONS["chime"]):
+        self.playback.play(self._clip(name) or tone(fallback))
+        self.reply_until = time.monotonic() + self.playback.remaining()
+
+    async def meeting_start(self, meeting_id: str | None, how: str) -> str:
+        """Start recording the room. `meeting_id`: from the voice talk that asked for it,
+        or None for a new meeting (the button, the control page). Returns "" or why not."""
+        from . import meetings
+        mc = self.cfg["meetings"]
+        if self.meeting:
+            return "a meeting is already being recorded"
+        if not mc["enabled"] or not hasattr(self.client, "identity"):
+            log.info("a meeting was asked for (%s), but recording needs the ANVE Box cloud", how)
+            return "recording a meeting needs the ANVE Box cloud ([voice] backend = \"anve-box\")"
+        ok, free, need = meetings.room_for(Path(mc["folder"]), mc["format"])
+        if not ok:
+            log.warning("no room on the card for a 3 hour meeting: %d MB free, %d MB needed", free, need)
+            await self._say_locally("There is not enough room on my card to record a meeting.")
+            return "not enough room on the card"
+        # the speaker stays out of the meeting: no talk, no music
+        await self.client.send({"type": "interrupt"})
+        if self.media:
+            self.media.ducked = False
+            await self.media.pause()
+        self.streaming = self.ptt = False
+        self.playback.flush()
+        rec = meetings.MeetingRecorder(self.cfg["boxlink"]["cloud"], self.client.identity, mc["folder"],
+                                       meeting=meeting_id, fmt=mc["format"], piece_s=mc["piece_s"],
+                                       on_event=self._on_meeting_event)
+        self.meeting, self.meeting_origin = rec, self.index
+        self.segmenter.reset()
+        self.recording = True
+        log.info("meeting recording started %s (%d MB free on the card)", how, free)
+        self._meeting_task = asyncio.create_task(self._meeting_run(rec))
+        self.look()
+        return ""
+
+    async def _on_meeting_event(self, ev: dict):
+        t = ev.get("type")
+        if t == "started":
+            log.info("the cloud has the meeting (it may last %s s more)", ev.get("limit"))
+            self._play_line("meeting_on")                 # "This meeting is being recorded."
+        elif t == "warning":
+            log.info("the meeting ends in about %s s (a limit)", ev.get("left"))
+            self._play_line("meeting_minute")             # "Recording ends in a minute."
+        elif t == "refused":
+            log.warning("the cloud refused a %s (%s)", ev.get("for"), ev.get("error"))
+
+    async def _meeting_run(self, rec):
+        """Until the cloud says the meeting is over (it uploads what is left, so this can
+        outlive the recording itself by minutes after a network cut)."""
+        from . import meetings
+        try:
+            ended = await rec.run()
+        except Exception as e:                               # noqa: BLE001
+            log.exception("the meeting connection failed")
+            ended = {"reason": "failed", "text": type(e).__name__}
+        reason, text = str(ended.get("reason") or ""), str(ended.get("text") or "")
+        log.info("meeting over: %s (%d pieces, %d kB sent as %s)", reason, rec.stats["pieces"],
+                 rec.stats["bytes"] // 1024, rec.stats["format"] or "nothing")
+        if reason in meetings.NEVER:
+            meetings.clear(rec.folder)
+        if self.meeting is rec:
+            # ended by the cloud, not by a stop here: a limit, or it would not take it
+            rec.stopped = True
+            self.meeting, self.recording = None, False
+            self.segmenter.reset()
+            if text:
+                await self._say_locally(text[:200])
+            else:
+                self._play_line("meeting_off")
+            self.look()
+        elif text and reason != "stopped":
+            await self._say_locally(text[:200])
+
+    async def meeting_mark(self) -> str:
+        if not self.meeting:
+            return "no meeting is being recorded"
+        at = self.meeting.mark()
+        log.info("mark at %.1f s", at / 1000)
+        self.playback.play(tone((1318.5, 1568.0), each=0.07, gain=0.12))
+        return ""
+
+    async def meeting_stop(self, how: str) -> str:
+        rec = self.meeting
+        if not rec:
+            return "no meeting is being recorded"
+        self.meeting, self.recording = None, False       # no more of the room is taken
+        self.segmenter.reset()
+        log.info("meeting recording stopped %s after %.0f s", how, rec.samples / RATE)
+        self._play_line("meeting_off")                    # "Recording stopped."
+        self.look()
+        await rec.stop()                                  # the last piece, then "stop"
+        return ""
+
+    async def _meeting_command(self, at_index: int):
+        """The wake word was heard during a meeting: let the cloud read the next 3 s."""
+        rec = self.meeting
+        if not rec:
+            return
+        answer = await rec.command(at_index - self.meeting_origin)
+        log.info("after the wake word in a meeting: %s", answer)
+        if answer == "mark":
+            self.playback.play(tone((1318.5, 1568.0), each=0.07, gain=0.12))
+        elif answer == "stop" and self.meeting is rec:
+            await self.meeting_stop("by voice")
+
+    async def _meeting_leftovers(self):
+        """At start-up: pieces of a meeting left on the card by a power cut go up now."""
+        from . import meetings
+        mc = self.cfg["meetings"]
+        if not mc["enabled"] or not hasattr(self.client, "identity"):
+            return
+        try:
+            n = await meetings.leftovers(self.cfg["boxlink"]["cloud"], self.client.identity, mc["folder"])
+            if n:
+                log.info("%d earlier meeting(s) had sound left on the card", n)
+        except Exception:                                    # noqa: BLE001
+            log.exception("could not look for earlier meetings")
 
     # ---------- buttons ----------
 
@@ -757,6 +1132,14 @@ class Device:
         now = time.monotonic()
         self.action_down, self.action_t = True, now
         press_index = self.index
+        if self.meeting:
+            # While a meeting is recorded the button belongs to it: a tap marks the moment
+            # (see release_action), holding it for 1.5 s stops the recording.
+            await asyncio.sleep(MEETING_HOLD_STOP_S)
+            if self.action_down and self.action_t == now and self.meeting:
+                self.action_t = 0.0                   # this press has done its work
+                await self.meeting_stop("by a long press")
+            return
         was_speaking = now < self.reply_until
         if now < self.alarm_until or was_speaking:
             self.alarm_until = 0.0
@@ -777,10 +1160,24 @@ class Device:
             self.send_from = press_index
             self.ptt = True
             self.look()
+            # Held on for 3 s in all: not push-to-talk but "record this meeting" (the
+            # team's handover: a long press starts one). The talk it opened is dropped.
+            await asyncio.sleep(MEETING_HOLD_START_S - self.cfg["buttons"]["tap_s"])
+            if self.action_down and self.action_t == now and self.ptt and not self.meeting \
+                    and self.cfg["meetings"]["enabled"] and hasattr(self.client, "identity"):
+                self.action_t = 0.0
+                self.ptt = False
+                log.info("button held for %.0f s: start a meeting", MEETING_HOLD_START_S)
+                await self.meeting_start(None, "by a long press")
 
     async def release_action(self):
         now = time.monotonic()
         self.action_down = False
+        if self.meeting:
+            if self.action_t and now - self.action_t < MEETING_HOLD_STOP_S:
+                await self.meeting_mark()                 # a tap during a meeting: mark this moment
+            self.last_tap = now
+            return
         if self.ptt:
             self.ptt = False
             log.info("push-to-talk end (%.1f s)", now - self.action_t)
@@ -853,7 +1250,7 @@ class Device:
         tasks = [asyncio.create_task(c) for c in (
             self.ec.run(), self.mic_loop(), self.client.run(), self.ticker(),
             self.bluetooth_keeper(), self.keep_speaker_awake(), self.route_watchdog(),
-            self.media_watch())]
+            self.media_watch(), self._meeting_leftovers())]
         if self.app:
             tasks.append(asyncio.create_task(self.app.run()))
         stop = asyncio.Event()
@@ -861,6 +1258,13 @@ class Device:
             loop.add_signal_handler(sig, stop.set)
         await stop.wait()
         log.info("stopping")
+        if self.meeting:
+            # the speaker is being stopped in the middle of a meeting: put the last piece
+            # on the card and say "no more"; what is not sent yet goes up after the restart
+            try:
+                await asyncio.wait_for(self.meeting_stop("because the speaker is stopping"), 12)
+            except Exception:                                # noqa: BLE001
+                log.warning("the last piece of the meeting may not have reached the card")
         await self.client.close()
         for t in tasks:
             t.cancel()

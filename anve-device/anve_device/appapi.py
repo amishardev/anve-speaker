@@ -131,6 +131,10 @@ class AppApi:
                 await asyncio.sleep(10)
         log.info("app API on port %s (box %s, %s)", a["port"], self.ident["id"],
                  "paired channel ready" if self.chan else "no token")
+        if a.get("panel_port"):                       # the browser control page, loopback only
+            from .panel import Panel
+            self.panel = Panel(self, int(a["panel_port"]))
+            await self.panel.start()
         while True:
             await asyncio.sleep(1)
             s = self.snapshot()

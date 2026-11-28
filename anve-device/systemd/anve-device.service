@@ -34,6 +34,9 @@ Environment=PYTHONUNBUFFERED=1
 LoadCredential=key:/etc/anve-device/key
 # the secret shared with paired phones (anve_device/appapi.py), root-only like the key
 LoadCredential=app-token:/etc/anve-device/app-token
+# the box's own identity (made by the factory step), for talking through the ANVE Box
+# cloud ([voice] backend = "anve-box"); the same credential anve-boxlink.service has
+LoadCredential=identity:/etc/anvebox/identity.json
 # /run/anve: where tools/pair_app.py leaves a pairing code for the running speaker
 RuntimeDirectory=anve
 RuntimeDirectoryMode=0700

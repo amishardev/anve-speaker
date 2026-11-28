@@ -37,6 +37,29 @@ DEFAULTS = {
         "tokens": 24,                # how much text one decode may produce (see wake.Spotter)
         "word": "hey_anve",
         "barge_in": True,            # spot "stop" / "cancel" / the wake word while it talks
+        # the owner's own recorded "Hey ANVE", matched by sound (wake.Enrolled). The file
+        # is made on the device by tools/wake_enroll.py and never leaves it. "" = off.
+        # Limits: lower = stricter. whole: the clip is the phrase; prefix: it starts with it.
+        "enrol_file": "recordings/enrol/templates.npz",
+        # the trained wake model (wake.Head, models/WAKE_MODEL.md). Live since 23 Nov 2026: a clip
+        # wakes if the rules OR the model say so (each caught one the other missed). model_live = false:
+        # shadow mode, it only writes its score to the journal next to what the rules did.
+        "model_file": "models/wake_head.onnx",
+        "model_limit": 0.9,
+        "model_live": True,
+        # the owner's recorded "ANVE stop" (tools/wake_enroll.py <folder> --stop): stops
+        # the music at once. Same limits as the wake recordings.
+        "stop_file": "recordings/enrol/stop.npz",
+        "enrol_whole": 0.122,
+        "enrol_prefix": 0.110,
+        # the limit for a burst cut out of the speaker's own music (wake.Burst): looser,
+        # the voice has music under it. Bursts that were not the phrase scored 0.20 and up.
+        "enrol_music": 0.17,
+        # the limit for the phrase anywhere in a 3 s window of music (its own scale, see
+        # wake.Enrolled.inside): windows without the phrase scored 0.37 and up
+        # 0.365 caught more (7 of 10) but woke twice on a song with nobody calling
+        # (0.308, 0.360), and the cloud then answered the music: 0.28 since 23 Nov 2026
+        "enrol_window": 0.28,
     },
     # the light strip: LUMINA (lumina/) draws it, the speaker reports its state to it.
     # [leds] is the older built-in driver, used only when lumina is switched off.
@@ -44,7 +67,17 @@ DEFAULTS = {
     "leds": {"enabled": True, "count": 30, "brightness": 0.35},
     # the link to the ANVE Box cloud (boxlink.py; github.com/ANVEAI/anve-box, protocol 1).
     # led: the Pi LED that plays the cloud's "blink" commands ("" = none)
+    # cloud: the ANVE Box cloud on Google Cloud (box-cloud.example since 27 Nov 2026; the team's handoffs, D35-D39, D95-D98)
     "boxlink": {"enabled": True, "cloud": "https://box-cloud.example", "led": "ACT"},
+    # Where "Hey ANVE" is answered. "anve-box": the ANVE Box cloud's Gemini voice, one
+    # connection per talk at [boxlink] cloud, proved with the box's own identity
+    # (boxvoice.py). "platform": the old ANVE platform ([server] url, the device key).
+    # follow_up_s: how long the speaker keeps listening after ANVE has answered.
+    "voice": {"backend": "platform", "follow_up_s": 8},
+    # Recording a meeting in the room through the ANVE Box cloud (meetings.py; needs
+    # [voice] backend = "anve-box"). folder: where pieces wait until the cloud has them.
+    # format: "ogg" (Ogg Opus, about 11 MB an hour) or "wav" (about 116 MB an hour).
+    "meetings": {"enabled": True, "folder": "/var/lib/anve-device/meetings", "piece_s": 55, "format": "ogg"},
     "buttons": {"mute_gpio": 17, "action_gpio": 27, "tap_s": 0.25},
     "alarm": {"rounds": 3},
     # things the speaker does itself: its own browser, YouTube, free radio (skills.py)
@@ -52,7 +85,10 @@ DEFAULTS = {
     # duck: the share of its volume music keeps while you talk to the speaker (it is
     # also muffled then, see skills.Media); announce: ANVE says "Playing ..." first
     # muffle = false: only turn the music down (if muffling ever leaves a song silent)
-    "skills": {"enabled": True, "duck": 0.3, "muffle": True, "announce": True},
+    # music_max: music never plays louder than the speaker at this volume (0 = no limit).
+    # Above about 0.30 this loudspeaker overloads the microphone and "Hey ANVE" cannot be
+    # heard over the song (see skills.Media). Raise it only with the speaker further away.
+    "skills": {"enabled": True, "duck": 0.3, "muffle": True, "announce": True, "music_max": 0.30},
     # taking turns (turn.py): after the chime you have start_s to begin; the request
     # ends pause_s after your last word
     "listen": {"start_s": 4.0, "pause_s": 1.4},
@@ -61,6 +97,7 @@ DEFAULTS = {
     # the phone app's API on the local network (appapi.py). The token it shares with
     # paired phones is root-only, like the device key, and arrives as a credential.
     "app": {"enabled": True, "host": "0.0.0.0", "port": 8738,
+            "panel_port": 8739,          # browser control page on 127.0.0.1 only (panel.py); 0 = off
             "token_file": "/etc/anve-device/app-token"},
 }
 

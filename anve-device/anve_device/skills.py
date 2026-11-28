@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -58,27 +59,96 @@ _WORDS = {"zero": 0, "five": 5, "fifteen": 15, "half": 50, "full": 100, "max": 1
           "maximum": 100, "hundred": 100, "a hundred": 100, "one hundred": 100, **_TENS}
 
 
+_UNITS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+          "eight": 8, "nine": 9}
+_TEENS = {"eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "sixteen": 16,
+          "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_WORDS.update(_UNITS)
+_WORDS.update(_TEENS)
+#: the words a spoken command must start with, once a greeting and a (possibly misheard)
+#: name are taken off: "Hey Anvi, set volume ..." reaches the speaker as often as "Hey ANVE"
+_VERBS = ("play", "pause", "stop", "resume", "continue", "skip", "next", "open", "search", "look",
+          "volume", "set", "change", "put", "make", "turn", "increase", "decrease", "raise",
+          "lower", "reduce", "go", "show", "launch", "start", "listen", "google", "louder",
+          "quieter", "softer", "be", "keep", "carry", "unpause")
+
+
 def _number(s: str) -> int | None:
-    """30, "30", "thirty", "thirty five", "half", "full" -> a percentage; else None."""
+    """30, "30", "thirty", "thirty five", "eighty two", "half", "full" -> a percentage; else None."""
     s = s.strip().replace("-", " ")
     if s.isdigit():
         return int(s)
     if s in _WORDS:
         return _WORDS[s]
     parts = s.split()
-    if len(parts) == 2 and parts[0] in _TENS and parts[1] == "five":
-        return _TENS[parts[0]] + 5
+    if len(parts) == 2 and parts[0] in _TENS and parts[1] in _UNITS:
+        return _TENS[parts[0]] + _UNITS[parts[1]]
     return None
+
+
+def _volume(t: str) -> dict | None:
+    """A volume order anywhere in a short sentence. The server's transcript of the same
+    words varies ("Set the volume to 80%", "Hey Anvi set volume at eighty percent",
+    "increase the volume to 80"), so this looks for the word and the number, not a shape."""
+    if "volume" not in t.split() or len(t.split()) > 14:
+        return None
+    m = re.search(r"\bvolume(?: level)?(?: (?:up |down )?(?:to|at|is|of|by))? (\d{1,3}|[a-z]+(?: [a-z]+)?)\b", t)
+    if m:
+        words = m.group(1).split()
+        level = _number(m.group(1))
+        if level is None and len(words) == 2:
+            level = _number(words[0])
+        if level is not None:
+            return {"do": "volume", "level": max(5, min(100, level)) / 100}
+    m = re.search(r"\b(\d{1,3}) (?:percent|per cent) volume\b", t)
+    if m:
+        return {"do": "volume", "level": max(5, min(100, int(m.group(1)))) / 100}
+    if re.search(r"\b(?:volume (?:up|higher)|(?:increase|raise|turn up) (?:the )?(?:speaker )?volume)\b", t):
+        return {"do": "volume", "step": 0.1}
+    if re.search(r"\b(?:volume (?:down|lower)|(?:decrease|lower|reduce|turn down) (?:the )?(?:speaker )?volume)\b", t):
+        return {"do": "volume", "step": -0.1}
+    return None
+
+
+# "What time is it?" is answered from the speaker's own clock. The cloud answered "4 PM" at
+# 5:15 PM (23 Nov 2026): it does not know this device's local time, and the device has no
+# way to tell it. Narrow on purpose: the sentence must END with the question, so "what time
+# is it in London", timers and alarms still go to ANVE.
+_TIME = re.compile(r"\b(?:what(?:'s| is) (?:the )?(?:current )?time|what time is it|what's the time|"
+                   r"tell me (?:the )?(?:current )?time|(?:the )?current time|time is it)"
+                   r"(?: right)?(?: now)?$")
+
+
+def is_time_question(text: str) -> bool:
+    t = re.sub(r"[^\w\s']", " ", (text or "").lower())
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r" (please|now|right now)$", "", t).strip()
+    return 0 < len(t.split()) <= 9 and bool(_TIME.search(t))
+
+
+def time_line() -> str:
+    """'It is 5:15 PM.' from the Pi's clock (kept right by NTP, zone set at setup)."""
+    return "It is " + time.strftime("%I:%M %p").lstrip("0") + "."
 
 
 def parse(text: str) -> dict | None:
     """{'do': ..., ...} if the sentence is one the speaker handles itself, else None."""
     t = re.sub(r"[^\w\s'&.+-]", " ", (text or "").lower())
     t = re.sub(r"\s+", " ", t).strip(" .")
+    # "hey anvi, set ..." / "hi and we play ...": a greeting, then a misheard name of one
+    # or two words, then a command word. The name goes; "hey play ..." is left alone.
+    m = re.match(r"(?:hey|hi|ok|okay|hello)[, ]+((?:[\w']+[, ]+){1,2}?)(\w+)", t)
+    if m and m.group(2) in _VERBS and m.group(1).split()[0].strip(",") not in _VERBS:
+        t = t[m.start(2):]
     t = _LEAD.sub("", t).strip()
     t = re.sub(r" (please|now|for me|right now)$", "", t).strip()
     if not t or len(t) > 120:
         return None
+    if is_time_question(t):
+        return {"do": "time"}
+    vol = _volume(t)
+    if vol:
+        return vol
     if re.fullmatch(r"(stop|pause|stop it|pause it)( the)?( music| song| video| radio| playing| playback)?", t) \
             or t in ("stop playing", "be quiet", "turn it off", "turn off the music"):
         return {"do": "pause"}
@@ -551,25 +621,45 @@ _DUCK_JS = """(async () => {
 class Media:
     """What is playing, and the one place that pauses, resumes and ducks it."""
 
-    def __init__(self, duck: float = 0.3, muffle: bool = True):
+    def __init__(self, duck: float = 0.3, muffle: bool = True, music_max: float = 0.0):
         self.browser, self.radio = Browser(), Radio()
+        # Music is never played louder than the speaker at `music_max` of its volume
+        # (0 = no limit), whatever the speaker volume is set to; ANVE's own voice is not
+        # limited. Why: this loudspeaker stands so close to the microphone that above
+        # about 30 % the microphone itself overloads (measured 23 Nov 2026 with a song
+        # playing: at 50 % one sample in twenty was clipped and the echo canceller took
+        # only 15 dB of the music away; at 30 % nothing clipped and it took 28 dB). With
+        # the music left over as loud as a voice, "Hey ANVE" cannot be heard by any means.
+        self.music_max, self.cap = music_max, 1.0
         self.muffle = muffle                           # low-pass the browser's music while listening
         self.ducked = False
         self.duck_level = max(0.05, min(1.0, duck))   # share of the volume kept while listening
         self.last_station = "default"
         self.last_query = self.restarted_for = ""
 
+    def set_speaker(self, volume: float):
+        """The speaker volume changed: work out how far music must be turned down. The
+        sink's volume scale is cubic, so its share is a plain ratio on that scale."""
+        self.cap = min(1.0, self.music_max / max(volume, 0.05)) if self.music_max else 1.0
+
+    async def recap(self):
+        """Put the limit on whatever plays now (a next video is a new player)."""
+        if self.cap < 1.0 and self.playing and not self.ducked:
+            await self._scale(1.0, "radio" if self.radio.playing else "browser")
+
     async def _scale(self, k: float, which: str):
         """Set what is playing to `k` times its own volume (1.0 puts it back)."""
         try:
             if which == "browser":
-                await self.browser.js(_DUCK_JS % (k, "true" if (k < 1 and self.muffle) else "false"))
+                # the page's volume is a plain gain: the cubic share, cubed
+                await self.browser.js(_DUCK_JS % (round(k * self.cap ** 3, 4),
+                                                  "true" if (k < 1 and self.muffle) else "false"))
             elif which == "radio":
                 from .audio import nodes
                 for n in await asyncio.to_thread(nodes, "Stream/Output/Audio"):
                     if n["name"] == "anve-radio":
                         await asyncio.to_thread(subprocess.run, ["wpctl", "set-volume", str(n["id"]),
-                                                                 f"{0.6 * k:.2f}"], capture_output=True)
+                                                                 f"{0.6 * k * self.cap:.2f}"], capture_output=True)
         except Exception:                                    # noqa: BLE001
             log.warning("could not change the music volume")
 
